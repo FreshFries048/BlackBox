@@ -1,0 +1,55 @@
+Title: Fusion Node—Liquidity + Gamma + Time
+
+Type: Black Box / Microstructure
+
+Version: 1.0
+
+Date: 2025-05-17
+
+Status: Proven
+
+---
+
+Mentor-Grade Definition:
+Combine macro liquidity nodes, gamma “magnet” levels, and time array for super-confluence high-probability pivots. Edge fires at exact intersection of all three overlays, yielding rare but potent reversals or expansions.
+
+---
+
+Atomic Workflow / Rules:
+1. Overlay all macro liquidity levels (OBs, FVGs, session levels).
+2. Mark gamma pins and major expiry levels.
+3. Identify exact time window (e.g., 10am, 2:30pm) for confluence.
+4. Enter only at full alignment; size up and exit on strong reaction.
+
+---
+
+Validation / Falsification:
+- Valid: Expansion, reversal, or pivot at super-confluence.
+- Invalid: One overlay missing, or confluence is weak.
+
+---
+
+Example / Case Study:
+SPX hits max gamma at HTF FVG at 2:30pm—trend reverses sharply.
+
+---
+
+QA Pair (Mentor-Level):
+Q: How rare is this alignment?
+A: Very rare, but extremely high edge when present.
+
+---
+
+Metadata:
+Parent: Fusion Node
+Children: Gamma Time Confluence Node
+Related: Macro Liquidity, Dealer Gamma Pin, Time Array
+Confidence: Highest
+Source: DR, macro overlay backtest
+Review Date: 2025-07-01
+Tags: Fusion, Gamma, Liquidity, Time, Confluence
+
+---
+
+Pending / Attachments:
+[ ] Super-confluence event log and chart pending

@@ -1,0 +1,55 @@
+Title: Dark Pool Signature / Block Print Node
+
+Type: Black Box / Microstructure
+
+Version: 1.0
+
+Date: 2025-05-17
+
+Status: Proven
+
+---
+
+Mentor-Grade Definition:
+Hidden institutional orders (blocks, VWAP, dark pool trades) create “signature” prints or delayed price effects in the lit market. Detecting these flows reveals delayed price drift or trend initiation.
+
+---
+
+Atomic Workflow / Rules:
+1. Monitor time & sales for large prints off-market or odd-lot prints at key levels.
+2. Watch for volume surges with minimal visible size on Level 2.
+3. Fade or ride after-effect—if a big buy, look for delayed drift up; if a big sell, drift down.
+4. Log block prints and follow-through for pattern analysis.
+
+---
+
+Validation / Falsification:
+- Valid: Large dark print is followed by delayed directional move.
+- Invalid: No effect, or dark print is paired/hedged immediately.
+
+---
+
+Example / Case Study:
+AAPL shows 500k dark print at $180; next hour, price drifts up 0.5%.
+
+---
+
+QA Pair (Mentor-Level):
+Q: Not all dark prints are directional—how to filter?
+A: Focus on persistent one-sided prints at support/resistance, not matched crosses.
+
+---
+
+Metadata:
+Parent: Hidden Liquidity
+Children: Block Trade Drift, Dark Pool VWAP Node
+Related: Block Order Footprint Detection, Volume Imbalance
+Confidence: High
+Source: DR / Tape Reading
+Review Date: 2025-07-01
+Tags: Dark Pool, Block, VWAP, Tape
+
+---
+
+Pending / Attachments:
+[ ] Pending annotated tape/volume charts

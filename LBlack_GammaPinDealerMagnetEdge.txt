@@ -1,0 +1,55 @@
+Title: Gamma Pin / Dealer Magnet Edge
+
+Type: Black Box / Microstructure
+
+Version: 1.0
+
+Date: 2025-05-17
+
+Status: Proven
+
+---
+
+Mentor-Grade Definition:
+Dealer net gamma exposure at key strikes creates a “magnet” for price, pinning to max open interest/gamma until expiry, then enabling trend post-expiry. Key institutional edge for mean reversion and post-expiry regime shifts.
+
+---
+
+Atomic Workflow / Rules:
+1. Download OI/gamma by strike for main asset (SPX, NQ, ES, etc.).
+2. Overlay strike OI on price/time chart.
+3. Fade mean-reverting moves toward pin strike pre-expiry.
+4. Trade trend breakout post-expiry as dealer gamma flips/unwinds.
+
+---
+
+Validation / Falsification:
+- Valid: Price pins at max gamma/OI, then trends after expiry.
+- Invalid: No pin effect; price trends despite gamma.
+
+---
+
+Example / Case Study:
+SPX pinned to 4100, then breaks 4120 after OPEX as gamma hedges unwind.
+
+---
+
+QA Pair (Mentor-Level):
+Q: What if no live OI/gamma data is available?
+A: Use delayed CBOE data, SpotGamma, or IV skew as proxies.
+
+---
+
+Metadata:
+Parent: Dealer Positioning
+Children: Gamma Pin, Dealer Hedge Flow
+Related: Option Expiry Regime Shift, Fusion Gamma-Time Nodes
+Confidence: High (with data)
+Source: Black Box DR, OI analytics
+Review Date: 2025-07-01
+Tags: Gamma, OI, Pin, Dealer, Expiry
+
+---
+
+Pending / Attachments:
+[ ] Pending gamma overlays; OPEX trend study

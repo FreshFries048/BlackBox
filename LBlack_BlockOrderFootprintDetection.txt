@@ -1,0 +1,55 @@
+Title: Block Order Footprint Detection
+
+Type: Black Box / Microstructure
+
+Version: 1.0
+
+Date: 2025-05-17
+
+Status: Proven
+
+---
+
+Mentor-Grade Definition:
+Large funds split trades, but “footprints” appear as persistent volume clusters at key prices; edge is to trade with the breakout after the footprint is confirmed.
+
+---
+
+Atomic Workflow / Rules:
+1. Mark levels with persistent large prints and small net range.
+2. Enter on expansion after final absorption or “push.”
+3. Confirm direction with OI delta or footprint chart.
+4. Exit at next liquidity node or risk level.
+
+---
+
+Validation / Falsification:
+- Valid: Price accelerates after cluster breaks.
+- Invalid: Cluster is fake, price retraces.
+
+---
+
+Example / Case Study:
+AAPL trades 1m shares at $190 with no movement; finally pops $1 as block finishes.
+
+---
+
+QA Pair (Mentor-Level):
+Q: How to distinguish fund footprints from retail chop?
+A: Look for size, persistence, and strong reaction after breakout.
+
+---
+
+Metadata:
+Parent: Block Order Node
+Children: Footprint Breakout Node
+Related: Hidden Liquidity, Block Trade Drift
+Confidence: High
+Source: Bookmap/Footprint
+Review Date: 2025-07-01
+Tags: Block, Footprint, Breakout, Absorption
+
+---
+
+Pending / Attachments:
+[ ] Block cluster chart overlays pending
