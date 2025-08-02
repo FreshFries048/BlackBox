@@ -1,5 +1,5 @@
 """
-BlackBox Phase 3 Demo - Complete Trading System Integration
+BlackBox Trading System - Main Application
 
 This script demonstrates the full BlackBox Core Engine pipeline:
 Phase 1: Strategy Node Parsing
@@ -11,12 +11,42 @@ Shows end-to-end functionality from strategy files to completed trades.
 
 import pandas as pd
 import numpy as np
+import os
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
-# Import all BlackBox components
+# Import all BlackBox components directly
 from blackbox_core import NodeEngine
 from node_detector import NodeDetectorEngine, SignalEvent
 from trade_executor import TradeExecutorEngine, RiskManager, Position
+
+# Configuration
+class Config:
+    """Configuration settings for the BlackBox system."""
+    
+    # Directory paths
+    BASE_DIR = Path(__file__).parent
+    DATA_DIR = BASE_DIR / "data"
+    RAW_DATA_DIR = DATA_DIR / "raw"
+    PROCESSED_DATA_DIR = DATA_DIR / "processed"
+    RESULTS_DIR = BASE_DIR / "results"
+    LOGS_DIR = BASE_DIR / "logs"
+    
+    # Data files
+    EUR_USD_DATA = RAW_DATA_DIR / "EURUSD_1H_2020-2024.csv"
+    STRATEGY_NODES_DIR = RAW_DATA_DIR / "blackbox_nodes"
+    
+    # Output files
+    TRADES_CSV = RESULTS_DIR / "complete_system_trades.csv"
+    SIGNALS_CSV = RESULTS_DIR / "complete_system_signals.csv"
+    BACKTEST_LOG = LOGS_DIR / "backtest_results.txt"
+    
+    @classmethod
+    def ensure_directories(cls):
+        """Ensure all required directories exist."""
+        for dir_path in [cls.DATA_DIR, cls.PROCESSED_DATA_DIR, cls.RESULTS_DIR, cls.LOGS_DIR]:
+            dir_path.mkdir(exist_ok=True)
 
 
 def load_real_eurusd_data(num_points: int = 500, start_date: str = "2024-01-01"):
@@ -25,8 +55,8 @@ def load_real_eurusd_data(num_points: int = 500, start_date: str = "2024-01-01")
     print("📊 Loading real EUR/USD market data...")
     
     try:
-        # Load the real EUR/USD data
-        df = pd.read_csv('/workspaces/BlackBox/EURUSD_1H_2020-2024.csv')
+        # Load the real EUR/USD data using Config path
+        df = pd.read_csv(Config.EUR_USD_DATA)
         print(f"   ✅ Loaded {len(df)} rows of real EUR/USD data")
         
         # Convert timestamp column
@@ -114,12 +144,15 @@ def run_complete_blackbox_system():
     print("🚀 BLACKBOX COMPLETE SYSTEM DEMONSTRATION")
     print("="*80)
     
+    # Ensure all required directories exist
+    Config.ensure_directories()
+    
     # PHASE 1: Load Strategy Nodes
     print("\n🔧 PHASE 1: Loading Strategy Knowledge Base")
     print("-" * 50)
     
     node_engine = NodeEngine()
-    loaded_count = node_engine.load_nodes_from_folder("/workspaces/BlackBox/blackbox_nodes")
+    loaded_count = node_engine.load_nodes_from_folder(str(Config.STRATEGY_NODES_DIR))
     print(f"✅ Loaded {loaded_count} strategy nodes successfully")
     
     # Show strategy summary
@@ -179,7 +212,7 @@ def run_complete_blackbox_system():
     print("="*80)
     
     # Export trade log
-    trade_log_path = executor.export_trades_to_csv("complete_system_trades.csv")
+    trade_log_path = executor.export_trades_to_csv(str(Config.TRADES_CSV))
     
     # Show performance summary
     executor.print_performance_summary()
@@ -205,7 +238,7 @@ def run_complete_blackbox_system():
     print(f"Signal-to-Trade Conversion: {(trades_opened/len(tradeable_signals)*100):.1f}%")
     
     # Export all data for analysis
-    detector.export_signals_to_csv("complete_system_signals.csv")
+    detector.export_signals_to_csv(str(Config.SIGNALS_CSV))
     
     return {
         'node_engine': node_engine,

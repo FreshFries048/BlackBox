@@ -11,43 +11,92 @@ from blackbox_core import NodeEngine
 from node_detector import NodeDetectorEngine, SignalEvent
 
 
-def create_strategic_market_data():
-    """Create realistic market data with strategic patterns for testing."""
+def load_real_eurusd_data_focused(num_points: int = 100):
+    """Load focused real EUR/USD data for signal detection testing."""
     
-    print("📊 Creating strategic market data...")
+    print("📊 Loading real EUR/USD data for focused testing...")
     
-    # Create 50 data points for focused testing
-    timestamps = pd.date_range('2024-08-02 09:30:00', periods=50, freq='2min')
-    base_price = 4100.0
-    
-    # Create realistic price movement
-    np.random.seed(42)
-    price_changes = np.random.randn(50) * 0.3  # Smaller moves
-    prices = base_price + np.cumsum(price_changes)
-    
-    data = {
-        'timestamp': timestamps,
-        'price': prices,
-        'volume': np.random.randint(2000, 8000, 50),
-        'gamma': np.random.randint(10, 500, 50),
-        'dark_prints': np.random.randint(0, 3, 50),
-        'footprint_clusters': np.random.randint(0, 2, 50),
-        'block_size': np.zeros(50),  # Start with no blocks
-    }
-    
-    # Add strategic events at specific times
-    strategic_events = [
-        (5, 'gamma_spike', {'gamma': 2000, 'block_size': 0}),
-        (12, 'block_trade', {'block_size': 8000, 'dark_prints': 10}),
-        (20, 'fusion_event', {'gamma': 1500, 'block_size': 5000, 'footprint_clusters': 3}),
-        (30, 'dark_pool', {'dark_prints': 15, 'block_size': 3000}),
-        (40, 'gamma_pin', {'gamma': 3000, 'volume': 15000}),
-    ]
-    
-    for idx, event_type, values in strategic_events:
-        for key, value in values.items():
-            data[key][idx] = value
-        print(f"   Added {event_type} at index {idx} (time: {timestamps[idx].strftime('%H:%M')})")
+    try:
+        # Load the real EUR/USD data
+        df = pd.read_csv('/workspaces/BlackBox/EURUSD_1H_2020-2024.csv')
+        print(f"   ✅ Loaded {len(df)} rows of real EUR/USD data")
+        
+        # Convert timestamp column
+        df['time'] = pd.to_datetime(df['time'])
+        
+        # Take a focused subset for testing (recent volatile period)
+        df_subset = df.tail(num_points).copy().reset_index(drop=True)
+        
+        print(f"   📈 Using {len(df_subset)} data points from {df_subset['time'].iloc[0]} to {df_subset['time'].iloc[-1]}")
+        
+        # Calculate enhanced indicators for signal detection
+        df_subset['price_change'] = df_subset['close'].pct_change()
+        df_subset['volatility'] = df_subset['high'] - df_subset['low']
+        df_subset['volume_ma'] = df_subset['tick_volume'].rolling(window=5).mean()
+        df_subset['volume_ratio'] = df_subset['tick_volume'] / df_subset['volume_ma']
+        
+        # Create enhanced synthetic indicators based on real market patterns
+        np.random.seed(42)  # Consistent results
+        
+        # Gamma exposure based on volatility and volume
+        base_gamma = (df_subset['volatility'] * 5000).fillna(100)
+        df_subset['gamma'] = (base_gamma + np.random.randint(10, 200, len(df_subset))).astype(int)
+        
+        # Dark pool activity during volume spikes
+        df_subset['dark_prints'] = np.where(
+            df_subset['volume_ratio'].fillna(1) > 1.3,
+            np.random.randint(5, 15, len(df_subset)),
+            np.random.randint(0, 3, len(df_subset))
+        )
+        
+        # Block trades during significant movements
+        significant_moves = abs(df_subset['price_change'].fillna(0)) > df_subset['price_change'].std()
+        df_subset['block_size'] = np.where(
+            significant_moves,
+            np.random.randint(3000, 12000, len(df_subset)),
+            np.random.randint(0, 1000, len(df_subset))
+        )
+        
+        # Footprint clusters
+        df_subset['footprint_clusters'] = np.random.randint(0, 4, len(df_subset))
+        
+        # Add strategic events at high volatility points
+        high_vol_indices = df_subset.nlargest(5, 'volatility').index.tolist()
+        for i, idx in enumerate(high_vol_indices[:3]):
+            if i == 0:
+                df_subset.loc[idx, 'gamma'] = 2500
+                print(f"   🎯 Enhanced gamma spike at {df_subset.loc[idx, 'time']}")
+            elif i == 1:
+                df_subset.loc[idx, 'block_size'] = 15000
+                df_subset.loc[idx, 'dark_prints'] = 12
+                print(f"   🎯 Enhanced block trade at {df_subset.loc[idx, 'time']}")
+            else:
+                df_subset.loc[idx, 'gamma'] = 1800
+                df_subset.loc[idx, 'block_size'] = 8000
+                df_subset.loc[idx, 'footprint_clusters'] = 4
+                print(f"   🎯 Enhanced fusion event at {df_subset.loc[idx, 'time']}")
+        
+        # Prepare data dictionary
+        data = {
+            'timestamp': df_subset['time'],
+            'price': df_subset['close'],
+            'volume': df_subset['tick_volume'],
+            'gamma': df_subset['gamma'],
+            'dark_prints': df_subset['dark_prints'],
+            'footprint_clusters': df_subset['footprint_clusters'],
+            'block_size': df_subset['block_size'],
+            'volatility': df_subset['volatility'],
+            'spread': df_subset['spread']
+        }
+        
+        return data
+        
+    except FileNotFoundError:
+        print("❌ EUR/USD CSV file not found. Please ensure 'EURUSD_1H_2020-2024.csv' exists.")
+        raise
+    except Exception as e:
+        print(f"❌ Error loading EUR/USD data: {str(e)}")
+        raise
     
     return data
 
@@ -63,9 +112,9 @@ def demonstrate_detection_engine():
     node_engine = NodeEngine()
     node_engine.load_nodes_from_folder("/workspaces/BlackBox/blackbox_nodes")
     
-    # 2. Create strategic market data
-    print("\n2. Creating strategic market data...")
-    market_data = create_strategic_market_data()
+    # 2. Load real EUR/USD market data
+    print("\n2. Loading real EUR/USD market data...")
+    market_data = load_real_eurusd_data_focused(100)
     
     # 3. Initialize detector
     print("\n3. Initializing NodeDetectorEngine...")

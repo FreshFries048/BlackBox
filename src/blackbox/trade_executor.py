@@ -15,7 +15,7 @@ import os
 from enum import Enum
 
 # Import Phase 2 components
-from node_detector import SignalEvent
+from .node_detector import SignalEvent
 
 
 class PositionStatus(Enum):
