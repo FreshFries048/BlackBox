@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import os
 import sys
+import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from pathlib import Path
 from blackbox_core import NodeEngine
 from node_detector import NodeDetectorEngine, SignalEvent
 from trade_executor import TradeExecutorEngine, RiskManager, Position
+from blackbox_config.config_loader import resolve_data_path, get_rr
+from dataset_scanner import DatasetScanner
 
 # Configuration
 class Config:
@@ -35,7 +38,7 @@ class Config:
     
     # Data files
     EUR_USD_DATA = RAW_DATA_DIR / "EURUSD_1H_2020-2024.csv"
-    STRATEGY_NODES_DIR = RAW_DATA_DIR / "blackbox_nodes"
+    STRATEGY_NODES_DIR = BASE_DIR / "blackbox_nodes"
     
     # Output files
     TRADES_CSV = RESULTS_DIR / "complete_system_trades.csv"
@@ -49,14 +52,63 @@ class Config:
             dir_path.mkdir(exist_ok=True)
 
 
-def load_real_eurusd_data(num_points: int = 500, start_date: str = "2024-01-01"):
+def select_risk_reward_ratio() -> float:
+    """
+    Interactive selection of risk-reward ratio.
+    
+    Returns:
+        Selected RR ratio as float
+    """
+    rr_options = [
+        ("1", "0.5:1 (Conservative - Take profit at half the risk)", 0.5),
+        ("2", "1:1 (Balanced - Equal risk/reward)", 1.0),
+        ("3", "1:2 (Moderate - 2x risk for reward)", 2.0),
+        ("4", "1:3 (Aggressive - 3x risk for reward)", 3.0),
+        ("5", "1:4 (Very Aggressive - 4x risk for reward)", 4.0),
+        ("6", "1:5 (Maximum - 5x risk for reward)", 5.0)
+    ]
+    
+    print(f"\n⚖️  RISK-REWARD RATIO SELECTION")
+    print("=" * 60)
+    print("Choose your preferred risk-reward multiple:")
+    print()
+    
+    for option, description, _ in rr_options:
+        print(f"{option}. {description}")
+    
+    print()
+    
+    while True:
+        try:
+            choice = input("Enter your choice (1-6, or 'q' to quit): ").strip()
+            
+            if choice.lower() == 'q':
+                print("\n👋 Goodbye!")
+                sys.exit(0)
+                
+            choice_num = int(choice)
+            if 1 <= choice_num <= 6:
+                selected = rr_options[choice_num - 1]
+                print(f"\n✅ Selected: {selected[1]}")
+                return selected[2]
+            else:
+                print(f"❌ Invalid choice. Please enter 1-6")
+                
+        except ValueError:
+            print("❌ Invalid input. Please enter a number (1-6) or 'q'")
+        except KeyboardInterrupt:
+            print("\n\n👋 Goodbye!")
+            sys.exit(0)
+
+
+def load_real_eurusd_data(data_path: Path, num_points: int = 500, start_date: str = "2024-01-01"):
     """Load real EUR/USD data from CSV file and enhance with trading indicators."""
     
     print("📊 Loading real EUR/USD market data...")
     
     try:
-        # Load the real EUR/USD data using Config path
-        df = pd.read_csv(Config.EUR_USD_DATA)
+        # Load the real EUR/USD data using provided path
+        df = pd.read_csv(data_path)
         print(f"   ✅ Loaded {len(df)} rows of real EUR/USD data")
         
         # Convert timestamp column
@@ -138,7 +190,7 @@ def load_real_eurusd_data(num_points: int = 500, start_date: str = "2024-01-01")
         raise
 
 
-def run_complete_blackbox_system():
+def run_complete_blackbox_system(data_path: Path = None, rr_multiple: float = None):
     """Run the complete BlackBox trading system end-to-end."""
     
     print("🚀 BLACKBOX COMPLETE SYSTEM DEMONSTRATION")
@@ -165,7 +217,9 @@ def run_complete_blackbox_system():
     print("-" * 50)
     
     # Create market data from real EUR/USD data
-    market_data = load_real_eurusd_data(500, "2024-01-01")
+    if data_path is None:
+        data_path = Config.EUR_USD_DATA
+    market_data = load_real_eurusd_data(data_path, 500, "2024-01-01")
     
     # Initialize signal detector
     detector = NodeDetectorEngine(node_engine, market_data)
@@ -196,9 +250,16 @@ def run_complete_blackbox_system():
     print("-" * 50)
     
     # Initialize trade executor with forex-appropriate risk settings
+    if rr_multiple is None:
+        rr_multiple = 3.0  # Default fallback
+    
+    print(f"💼 Risk Management Configuration:")
+    print(f"   Risk-Reward Multiple: {rr_multiple}")
+    
     risk_manager = RiskManager(
         default_stop_loss_pct=50,    # 50 pips default (overridden by pip-based logic)
-        default_take_profit_pct=60   # 60 pips default (overridden by pip-based logic)
+        default_take_profit_pct=60,  # 60 pips default (overridden by pip-based logic)
+        rr_multiple=rr_multiple
     )
     
     executor = TradeExecutorEngine(market_data, risk_manager)
@@ -213,6 +274,9 @@ def run_complete_blackbox_system():
     
     # Export trade log
     trade_log_path = executor.export_trades_to_csv(str(Config.TRADES_CSV))
+    
+    # Export side statistics
+    side_stats_path = executor.export_side_statistics_to_csv(str(Config.RESULTS_DIR / "side_statistics.csv"))
     
     # Show performance summary
     executor.print_performance_summary()
@@ -366,8 +430,48 @@ def show_sample_trades(executor):
 
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='BlackBox Trading System')
+    parser.add_argument('--data', type=str, help='Path to data file (CSV/Parquet)')
+    parser.add_argument('--rr', type=float, help='Risk-reward multiple')
+    args = parser.parse_args()
+    
+    # Smart dataset selection
+    if args.data:
+        # Use specified data file
+        data_path = resolve_data_path(args.data)
+    else:
+        # Use dataset scanner for interactive selection
+        print("🔍 No dataset specified. Scanning available datasets...\n")
+        scanner = DatasetScanner()
+        datasets = scanner.scan_datasets()
+        
+        if not datasets:
+            print("❌ No valid datasets found in data/csv_datasets/")
+            print("💡 Please add CSV files to data/csv_datasets/ or use --data flag")
+            sys.exit(1)
+        
+        scanner.display_datasets(datasets)
+        selected_dataset = scanner.select_dataset(datasets)
+        
+        if not selected_dataset:
+            print("\n👋 No dataset selected. Exiting.")
+            sys.exit(0)
+            
+        data_path = Path(selected_dataset['path'])
+        print(f"\n🎯 Using dataset: {selected_dataset['filename']}")
+    
+    # Interactive RR multiple selection
+    if args.rr:
+        # Use specified RR
+        rr_multiple = get_rr(args.rr)
+        print(f"\n⚖️  Using specified Risk-Reward Multiple: {rr_multiple}")
+    else:
+        # Use interactive RR selection
+        rr_multiple = select_risk_reward_ratio()
+    
     # Run the complete system
-    system_components = run_complete_blackbox_system()
+    system_components = run_complete_blackbox_system(data_path, rr_multiple)
     
     # Demonstrate advanced features
     demonstrate_advanced_features(system_components)
@@ -383,6 +487,7 @@ if __name__ == "__main__":
     print("   ✅ Automated trade execution with risk management")
     print("   ✅ Position management with SL/TP/Duration limits")
     print("   ✅ Performance tracking and analysis")
+    print("   ✅ LONG/SHORT position analytics and statistics")
     print("   ✅ CSV export for further analysis")
     print("   ✅ Modular architecture ready for production")
     print(f"\n🚀 Ready for:")

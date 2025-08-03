@@ -30,7 +30,7 @@ class BacktestRunner:
     Walk-forward backtesting engine for BlackBox trading strategies.
     """
     
-    def __init__(self, data_path: str, train_months: int = 3, test_months: int = 1):
+    def __init__(self, data_path: str, train_months: int = 3, test_months: int = 1, rr_multiple: float = 3.0):
         """
         Initialize backtest runner.
         
@@ -38,10 +38,12 @@ class BacktestRunner:
             data_path: Path to market data file (.csv or .parquet)
             train_months: Training period in months
             test_months: Testing period in months
+            rr_multiple: Risk-reward multiple for position sizing
         """
         self.data_path = Path(data_path)
         self.train_months = train_months
         self.test_months = test_months
+        self.rr_multiple = rr_multiple
         
         # Initialize components
         self.node_engine = NodeEngine()
@@ -171,11 +173,21 @@ class BacktestRunner:
         high_conf_signals = [s for s in signals if 'High' in s.confidence]
         
         # Initialize executor with enhanced risk management
-        risk_manager = RiskManager(risk_pct=0.02, account_equity=100000.0)
+        risk_manager = RiskManager(risk_pct=0.02, account_equity=100000.0, rr_multiple=self.rr_multiple)
         executor = TradeExecutorEngine(data_dict, risk_manager)
         
         # Run backtest
         trades_opened = executor.run_backtest(high_conf_signals)
+        
+        # Print side performance for this period
+        if executor.closed_trades:
+            side_performance = executor.calculate_side_performance()
+            if side_performance:
+                long_trades = side_performance['overall_distribution']['long_trades']
+                short_trades = side_performance['overall_distribution']['short_trades']
+                long_win_rate = side_performance['long_performance']['win_rate']
+                short_win_rate = side_performance['short_performance']['win_rate']
+                print(f"   Period {period_num} Side Stats: LONG: {long_trades} trades ({long_win_rate:.1f}% win rate), SHORT: {short_trades} trades ({short_win_rate:.1f}% win rate)")
         
         # Calculate period performance
         period_stats = self.calculate_period_stats(executor, test_data_enhanced, period_num)
@@ -185,6 +197,7 @@ class BacktestRunner:
             trade_dict = {
                 'period': period_num,
                 'node_name': trade.node_name,
+                'side': trade.side,  # Add side information
                 'entry_time': trade.timestamp,
                 'exit_time': trade.exit_timestamp,
                 'entry_price': trade.entry_price,
@@ -319,6 +332,30 @@ class BacktestRunner:
         
         return overall_stats
     
+    def _calculate_side_summary(self, trades_df: pd.DataFrame) -> pd.DataFrame:
+        """Calculate side performance summary from trades data."""
+        summary_data = []
+        
+        for side in ['LONG', 'SHORT']:
+            side_trades = trades_df[trades_df['side'] == side]
+            if len(side_trades) > 0:
+                winning_trades = len(side_trades[side_trades['pnl_points'] > 0])
+                win_rate = (winning_trades / len(side_trades)) * 100
+                total_pnl = side_trades['pnl_points'].sum()
+                avg_pnl = side_trades['pnl_points'].mean()
+                
+                summary_data.append({
+                    'side': side,
+                    'total_trades': len(side_trades),
+                    'winning_trades': winning_trades,
+                    'win_rate': win_rate,
+                    'total_pnl': total_pnl,
+                    'avg_pnl': avg_pnl,
+                    'percentage_of_total': (len(side_trades) / len(trades_df)) * 100
+                })
+        
+        return pd.DataFrame(summary_data)
+    
     def export_results(self, output_dir: str = "backtest_results"):
         """Export backtest results to files."""
         output_path = Path(output_dir)
@@ -332,6 +369,11 @@ class BacktestRunner:
         trades_df = pd.DataFrame(self.all_trades)
         if not trades_df.empty:
             trades_df.to_csv(output_path / "all_trades.csv", index=False)
+            
+            # Also export side statistics summary
+            if 'side' in trades_df.columns:
+                side_summary = self._calculate_side_summary(trades_df)
+                side_summary.to_csv(output_path / "side_performance_summary.csv", index=False)
         
         # Export period results
         periods_df = pd.DataFrame(self.walk_forward_results)
@@ -353,19 +395,21 @@ def main():
     """Main entry point for command-line usage."""
     parser = argparse.ArgumentParser(description="BlackBox Walk-Forward Backtest Runner")
     parser.add_argument("--data", required=True, help="Path to market data file (.csv or .parquet)")
-    parser.add_argument("--strategies", default="data/raw/blackbox_nodes", 
+    parser.add_argument("--strategies", default="blackbox_nodes", 
                        help="Path to strategies folder")
     parser.add_argument("--train-months", type=int, default=3, 
                        help="Training period in months")
     parser.add_argument("--test-months", type=int, default=1,
                        help="Testing period in months") 
+    parser.add_argument("--rr", type=float, default=3.0,
+                       help="Risk-reward multiple (default: 3.0)")
     parser.add_argument("--output", default="backtest_results",
                        help="Output directory for results")
     
     args = parser.parse_args()
     
     # Initialize and run backtest
-    runner = BacktestRunner(args.data, args.train_months, args.test_months)
+    runner = BacktestRunner(args.data, args.train_months, args.test_months, args.rr)
     
     try:
         overall_stats = runner.run_walk_forward_backtest(args.strategies)
