@@ -12,7 +12,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 import csv
 import os
-from blackbox_core import NodeEngine, StrategyNode
+from blackbox_core import NodeEngine, StrategyNode, MissingFeatureError
 
 
 @dataclass
@@ -264,6 +264,54 @@ class NodeDetectorEngine:
         """
         Evaluate whether a specific node's conditions are met.
         
+        Uses enhanced confluence logic if YAML critical_steps exist,
+        otherwise falls back to legacy workflow evaluation.
+        
+        Args:
+            node: Strategy node to evaluate
+            data_row: Current market data
+            row_idx: Current row index
+            
+        Returns:
+            Dictionary with evaluation results
+        """
+        # Check if node has YAML-defined critical steps (mathematical expressions)
+        has_mathematical_steps = any('>' in step or '<' in step or '=' in step 
+                                   for step in node.critical_steps + node.optional_steps)
+        
+        if has_mathematical_steps:
+            # Use new confluence logic for YAML-enhanced nodes
+            data_dict = data_row.to_dict()
+            confluence_result = self.node_engine.evaluate_node_confluence(node, data_dict)
+            
+            result = {
+                'should_trigger': confluence_result['fired'],
+                'matched_steps': confluence_result['critical_passed'] + confluence_result['optional_passed'],
+                'total_steps': confluence_result['critical_total'] + confluence_result['optional_total'],
+                'trigger_reason': "",
+                'matched_conditions': [],
+                'confidence_score': confluence_result['confidence_score']
+            }
+            
+            if result['should_trigger']:
+                critical_desc = f"{confluence_result['critical_passed']}/{confluence_result['critical_total']} critical"
+                optional_desc = f"{confluence_result['optional_passed']}/{confluence_result['optional_total']} optional" if confluence_result['optional_total'] > 0 else ""
+                
+                if optional_desc:
+                    result['trigger_reason'] = f"Confluence achieved: {critical_desc}, {optional_desc} (confidence: {result['confidence_score']:.1%})"
+                else:
+                    result['trigger_reason'] = f"Critical confluence: {critical_desc} (confidence: {result['confidence_score']:.1%})"
+        else:
+            # Fall back to legacy evaluation for existing strategy files
+            result = self._evaluate_legacy_workflow(node, data_row, row_idx)
+        
+        return result
+    
+    def _evaluate_legacy_workflow(self, node: StrategyNode, data_row: pd.Series, 
+                                 row_idx: int) -> Dict[str, Any]:
+        """
+        Legacy evaluation method for existing strategy files.
+        
         Args:
             node: Strategy node to evaluate
             data_row: Current market data
@@ -281,7 +329,7 @@ class NodeDetectorEngine:
             'matched_conditions': []
         }
         
-        # Evaluate each workflow step
+        # Evaluate each workflow step using legacy logic
         for step_idx, workflow_step in enumerate(node.workflow):
             step_matches = self._evaluate_workflow_step(workflow_step, node, data_row, row_idx)
             

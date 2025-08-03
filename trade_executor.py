@@ -148,101 +148,134 @@ class Position:
 
 class RiskManager:
     """
-    Handles risk management calculations for position sizing and levels.
+    Enhanced risk management with ATR-based stops and position sizing.
     """
     
-    def __init__(self, default_stop_loss_pct: float = 1.5, default_take_profit_pct: float = 2.5):
+    def __init__(self, default_stop_loss_pct: float = 1.5, default_take_profit_pct: float = 2.5,
+                 risk_pct: float = 0.02, account_equity: float = 100000.0):
         """
         Initialize risk manager.
         
         Args:
-            default_stop_loss_pct: Default stop loss percentage
-            default_take_profit_pct: Default take profit percentage
+            default_stop_loss_pct: Default stop loss percentage (fallback)
+            default_take_profit_pct: Default take profit percentage (fallback)
+            risk_pct: Risk percentage per trade (default 2%)
+            account_equity: Account equity for position sizing
         """
         self.default_stop_loss_pct = default_stop_loss_pct
         self.default_take_profit_pct = default_take_profit_pct
+        self.risk_pct = risk_pct
+        self.account_equity = account_equity
+        self.risk_multiple = 3.0  # Default risk:reward ratio
     
-    def calculate_stop_loss(self, entry_price: float, confidence: str) -> float:
+    def calculate_stop_loss(self, entry_price: float, confidence: str, 
+                           atr: Optional[float] = None) -> float:
         """
-        Calculate stop loss level based on entry price and confidence.
+        Calculate stop loss level using ATR or fallback to pip-based.
         
         Args:
             entry_price: Entry price for the position
             confidence: Confidence level of the signal
+            atr: Average True Range value (if available)
             
         Returns:
             Stop loss price level
         """
-        # For EUR/USD, use pip-based calculations (1 pip = 0.0001)
-        if "Highest" in confidence:
-            sl_pips = 30  # 30 pips for highest confidence
-        elif "High" in confidence:
-            sl_pips = 50  # 50 pips for high confidence
-        elif "Medium" in confidence:
-            sl_pips = 80  # 80 pips for medium confidence
+        if atr is not None and atr > 0:
+            # ATR-based stop loss (2 * ATR)
+            stop_distance = 2.0 * atr
+            return entry_price - stop_distance
         else:
-            sl_pips = 120  # 120 pips for low confidence
-        
-        return entry_price - (sl_pips * 0.0001)  # Assuming long positions
+            # Fallback to pip-based calculation for EUR/USD
+            if "Highest" in confidence:
+                sl_pips = 30  # 30 pips for highest confidence
+            elif "High" in confidence:
+                sl_pips = 50  # 50 pips for high confidence
+            elif "Medium" in confidence:
+                sl_pips = 80  # 80 pips for medium confidence
+            else:
+                sl_pips = 120  # 120 pips for low confidence
+            
+            return entry_price - (sl_pips * 0.0001)  # Assuming long positions
     
-    def calculate_take_profit(self, entry_price: float, confidence: str, signal_tags: List[str]) -> float:
+    def calculate_take_profit(self, entry_price: float, stop_loss: float, 
+                             confidence: str, signal_tags: List[str]) -> float:
         """
-        Calculate take profit level based on entry price, confidence, and signal characteristics.
+        Calculate take profit using risk multiple or confidence-based targets.
         
         Args:
             entry_price: Entry price for the position
+            stop_loss: Stop loss level
             confidence: Confidence level of the signal
             signal_tags: Tags from the original signal
             
         Returns:
             Take profit price level
         """
-        # For EUR/USD, use pip-based calculations
+        # Calculate stop distance for risk multiple calculation
+        stop_distance = entry_price - stop_loss
+        
+        # Base risk multiple
+        risk_multiple = self.risk_multiple
+        
+        # Adjust risk multiple based on confidence
         if "Highest" in confidence:
-            tp_pips = 80  # 80 pips for highest confidence
+            risk_multiple = 4.0  # Higher targets for highest confidence
         elif "High" in confidence:
-            tp_pips = 60  # 60 pips for high confidence
+            risk_multiple = 3.5
         elif "Medium" in confidence:
-            tp_pips = 40  # 40 pips for medium confidence
+            risk_multiple = 2.5
         else:
-            tp_pips = 25  # 25 pips for low confidence
+            risk_multiple = 2.0
         
         # Adjust based on signal type
         if any(tag.lower() in ['fusion', 'confluence'] for tag in signal_tags):
-            tp_pips = int(tp_pips * 1.3)  # Higher targets for confluence signals
+            risk_multiple *= 1.2  # Higher targets for confluence signals
         elif any(tag.lower() in ['gamma', 'pin'] for tag in signal_tags):
-            tp_pips = int(tp_pips * 1.1)  # Slightly higher for gamma signals
+            risk_multiple *= 1.1  # Slightly higher for gamma signals
         
-        return entry_price + (tp_pips * 0.0001)  # Assuming long positions
+        return entry_price + (stop_distance * risk_multiple)
     
-    def calculate_position_size(self, confidence: str, signal_matches: int) -> float:
+    def calculate_position_size(self, entry_price: float, stop_loss: float, 
+                               confidence: str, signal_matches: int) -> float:
         """
-        Calculate position size based on signal quality.
+        Calculate position size based on risk percentage and stop distance.
         
         Args:
+            entry_price: Entry price for the position
+            stop_loss: Stop loss level
             confidence: Confidence level of the signal
-            signal_matches: Number of workflow matches
+            signal_matches: Number of signal matches
             
         Returns:
-            Position size multiplier
+            Position size
         """
-        base_size = 1.0
+        # Calculate stop distance in price units
+        stop_distance = abs(entry_price - stop_loss)
         
-        # Size based on confidence
+        if stop_distance == 0:
+            return 1.0  # Default size if no stop distance
+        
+        # Calculate position size based on risk percentage
+        risk_amount = self.account_equity * self.risk_pct
+        position_size = risk_amount / stop_distance
+        
+        # Apply confidence multiplier
+        confidence_multiplier = 1.0
         if "Highest" in confidence:
-            size_multiplier = 1.5
+            confidence_multiplier = 1.5
         elif "High" in confidence:
-            size_multiplier = 1.2
+            confidence_multiplier = 1.3
         elif "Medium" in confidence:
-            size_multiplier = 1.0
-        else:
-            size_multiplier = 0.5
+            confidence_multiplier = 1.1
         
-        # Bonus for perfect workflow matches
-        if signal_matches >= 4:
-            size_multiplier *= 1.2
+        # Apply signal quality multiplier
+        signal_multiplier = min(2.0, 1.0 + (signal_matches * 0.1))
         
-        return base_size * size_multiplier
+        final_size = position_size * confidence_multiplier * signal_multiplier
+        
+        # Cap position size to reasonable limits
+        return min(final_size, 10.0)  # Max 10x normal size
 
 
 class TradeExecutorEngine:
@@ -470,10 +503,10 @@ class TradeExecutorEngine:
             # Calculate risk levels
             stop_loss = self.risk_manager.calculate_stop_loss(signal.entry_price, signal.confidence)
             take_profit = self.risk_manager.calculate_take_profit(
-                signal.entry_price, signal.confidence, signal.tags
+                signal.entry_price, stop_loss, signal.confidence, signal.tags
             )
             position_size = self.risk_manager.calculate_position_size(
-                signal.confidence, signal.workflow_matches
+                signal.entry_price, stop_loss, signal.confidence, signal.workflow_matches
             )
             
             # Create position

@@ -235,7 +235,8 @@ def run_complete_blackbox_system():
     print(f"Tradeable Signals: {len(tradeable_signals)}")
     print(f"Trades Executed: {executor.execution_stats['trades_executed']}")
     print(f"Trades Completed: {len(executor.closed_trades)}")
-    print(f"Signal-to-Trade Conversion: {(trades_opened/len(tradeable_signals)*100):.1f}%")
+    signal_to_trade_conversion = (trades_opened/len(tradeable_signals)*100) if len(tradeable_signals) > 0 else 0
+    print(f"Signal-to-Trade Conversion: {signal_to_trade_conversion:.1f}%")
     
     # Export all data for analysis
     detector.export_signals_to_csv(str(Config.SIGNALS_CSV))

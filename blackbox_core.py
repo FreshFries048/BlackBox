@@ -7,9 +7,16 @@ by parsing and structuring microstructure trading strategy nodes.
 
 import os
 import re
+import yaml
+import operator
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
+
+
+class MissingFeatureError(Exception):
+    """Raised when required data features are missing from DataFrame."""
+    pass
 
 
 @dataclass
@@ -26,6 +33,9 @@ class StrategyNode:
         qa_pair: Question and answer pair for mentor-level understanding
         metadata: Dictionary containing tags, relationships, confidence, etc.
         raw_content: Original file content for reference
+        critical_steps: List of critical workflow steps that must all pass
+        optional_steps: List of optional workflow steps that enhance confidence
+        quorum: Rule for evaluating steps ('critical', 'majority', 'all')
     """
     name: str
     type: str
@@ -35,6 +45,9 @@ class StrategyNode:
     qa_pair: Dict[str, str]
     metadata: Dict[str, Any]
     raw_content: str = ""
+    critical_steps: List[str] = field(default_factory=list)
+    optional_steps: List[str] = field(default_factory=list)
+    quorum: str = "critical"
     
     def __post_init__(self):
         """Ensure workflow is a list and validation/qa_pair are dicts"""
@@ -44,6 +57,12 @@ class StrategyNode:
             self.validation = {"criteria": str(self.validation)}
         if not isinstance(self.qa_pair, dict):
             self.qa_pair = {"qa": str(self.qa_pair)}
+        
+        # Ensure critical_steps and optional_steps are lists
+        if isinstance(self.critical_steps, str):
+            self.critical_steps = [self.critical_steps]
+        if isinstance(self.optional_steps, str):
+            self.optional_steps = [self.optional_steps]
 
 
 class NodeEngine:
@@ -57,6 +76,16 @@ class NodeEngine:
     def __init__(self):
         self.nodes: List[StrategyNode] = []
         self._parser = StrategyNodeParser()
+        self._operators = {
+            '>=': operator.ge,
+            '<=': operator.le,
+            '>': operator.gt,
+            '<': operator.lt,
+            '==': operator.eq,
+            '!=': operator.ne,
+            'in': lambda x, y: x in y,
+            'not_in': lambda x, y: x not in y
+        }
     
     def load_nodes_from_folder(self, folder_path: str) -> int:
         """
@@ -159,6 +188,129 @@ class NodeEngine:
                 high_conf_nodes.append(node)
         return high_conf_nodes
     
+    def evaluate_workflow_step(self, step: str, data: Dict[str, Any]) -> bool:
+        """
+        Evaluate a single workflow step against market data.
+        
+        Args:
+            step: Workflow step in format "metric operator value"
+            data: Market data dictionary
+            
+        Returns:
+            True if step evaluates to true, False otherwise
+        """
+        try:
+            # Parse step: "liquidity_spike >= 2"
+            step_clean = step.strip()
+            
+            # Find operator
+            op_found = None
+            op_symbol = None
+            for symbol, op_func in self._operators.items():
+                if symbol in step_clean:
+                    op_found = op_func
+                    op_symbol = symbol
+                    break
+            
+            if not op_found:
+                return False
+            
+            # Split by operator
+            parts = step_clean.split(op_symbol, 1)
+            if len(parts) != 2:
+                return False
+            
+            metric = parts[0].strip()
+            value_str = parts[1].strip()
+            
+            # Get metric value from data
+            if metric not in data:
+                return False
+            
+            metric_value = data[metric]
+            
+            # Convert comparison value to appropriate type
+            try:
+                if '.' in value_str:
+                    compare_value = float(value_str)
+                elif value_str.isdigit():
+                    compare_value = int(value_str)
+                elif value_str.startswith('[') and value_str.endswith(']'):
+                    # List comparison for 'in' operator
+                    compare_value = eval(value_str)  # Safe for controlled input
+                else:
+                    compare_value = value_str
+            except:
+                compare_value = value_str
+            
+            # Evaluate
+            return op_found(metric_value, compare_value)
+            
+        except Exception as e:
+            print(f"Error evaluating workflow step '{step}': {e}")
+            return False
+    
+    def evaluate_node_confluence(self, node: StrategyNode, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Evaluate node confluence logic with critical/optional steps.
+        
+        Args:
+            node: Strategy node to evaluate
+            data: Market data dictionary
+            
+        Returns:
+            Dictionary with evaluation results
+        """
+        critical_passed = 0
+        critical_total = len(node.critical_steps)
+        optional_passed = 0
+        optional_total = len(node.optional_steps)
+        
+        # Evaluate critical steps
+        for step in node.critical_steps:
+            if self.evaluate_workflow_step(step, data):
+                critical_passed += 1
+        
+        # Evaluate optional steps
+        for step in node.optional_steps:
+            if self.evaluate_workflow_step(step, data):
+                optional_passed += 1
+        
+        # Determine if node fires based on quorum rule
+        fired = False
+        confidence_score = 0.0
+        
+        if node.quorum == 'critical':
+            # All critical steps must pass
+            fired = (critical_passed == critical_total) if critical_total > 0 else True
+            confidence_score = (critical_passed / max(1, critical_total)) * 0.7
+        elif node.quorum == 'majority':
+            # Majority of all steps must pass
+            total_steps = critical_total + optional_total
+            total_passed = critical_passed + optional_passed
+            fired = (total_passed / max(1, total_steps)) >= 0.5
+            confidence_score = total_passed / max(1, total_steps)
+        elif node.quorum == 'all':
+            # All steps must pass
+            total_steps = critical_total + optional_total
+            total_passed = critical_passed + optional_passed
+            fired = (total_passed == total_steps) if total_steps > 0 else True
+            confidence_score = total_passed / max(1, total_steps)
+        
+        # Boost confidence with optional steps
+        if optional_total > 0:
+            optional_boost = (optional_passed / optional_total) * 0.3
+            confidence_score = min(1.0, confidence_score + optional_boost)
+        
+        return {
+            'fired': fired,
+            'confidence_score': confidence_score,
+            'critical_passed': critical_passed,
+            'critical_total': critical_total,
+            'optional_passed': optional_passed,
+            'optional_total': optional_total
+        }
+    
     def print_summary(self):
         """Print a formatted summary of all loaded nodes."""
         print(f"\n{'='*60}")
@@ -222,8 +374,24 @@ class StrategyNodeParser:
     def _parse_content(self, content: str) -> Optional[StrategyNode]:
         """Parse the content of a strategy node file."""
         try:
+            # Check for YAML front-matter
+            yaml_config = {}
+            remaining_content = content
+            
+            if content.strip().startswith('---'):
+                # Extract YAML front-matter
+                yaml_match = re.match(r'^---\s*\n(.*?)\n---\s*\n(.*)$', content, re.DOTALL)
+                if yaml_match:
+                    yaml_content = yaml_match.group(1)
+                    remaining_content = yaml_match.group(2)
+                    try:
+                        yaml_config = yaml.safe_load(yaml_content) or {}
+                    except yaml.YAMLError as e:
+                        print(f"Warning: Failed to parse YAML front-matter: {e}")
+                        yaml_config = {}
+            
             # Split content into sections based on --- separators
-            sections = content.split('---')
+            sections = remaining_content.split('---')
             
             # Extract basic metadata from the first section
             header_section = sections[0] if sections else ""
@@ -234,13 +402,22 @@ class StrategyNodeParser:
             node_type = metadata.get('type', 'Unknown Type')
             
             # Parse each section
-            description = self._extract_section(content, "Mentor-Grade Definition:")
-            workflow = self._extract_workflow(content)
-            validation = self._extract_validation(content)
-            qa_pair = self._extract_qa_pair(content)
+            description = self._extract_section(remaining_content, "Mentor-Grade Definition:")
+            workflow = self._extract_workflow(remaining_content)
+            validation = self._extract_validation(remaining_content)
+            qa_pair = self._extract_qa_pair(remaining_content)
             
             # Extract additional metadata
-            metadata.update(self._extract_metadata_section(content))
+            metadata.update(self._extract_metadata_section(remaining_content))
+            
+            # Extract YAML-defined workflow configuration
+            critical_steps = yaml_config.get('critical_steps', [])
+            optional_steps = yaml_config.get('optional_steps', [])
+            quorum = yaml_config.get('quorum', 'critical')
+            
+            # If no YAML config, use legacy workflow as critical steps
+            if not critical_steps and not optional_steps and workflow:
+                critical_steps = workflow
             
             return StrategyNode(
                 name=name,
@@ -250,7 +427,10 @@ class StrategyNodeParser:
                 validation=validation,
                 qa_pair=qa_pair,
                 metadata=metadata,
-                raw_content=content
+                raw_content=content,
+                critical_steps=critical_steps,
+                optional_steps=optional_steps,
+                quorum=quorum
             )
             
         except Exception as e:
