@@ -1,0 +1,29 @@
+# BlackBox Trading System - Production Grade Requirements
+
+# Core data processing
+pandas>=2.0.0
+numpy>=1.21.0
+pyarrow>=10.0.0  # For Parquet format support
+
+# API framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+
+# Testing framework
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# Environment and configuration
+python-dotenv>=1.0.0
+
+# Database
+sqlite3  # Built into Python
+
+# Utilities
+pathlib  # Built into Python
+hashlib  # Built into Python
+uuid  # Built into Python
+logging  # Built into Python
+dataclasses  # Built into Python (Python 3.7+)
+typing  # Built into Python

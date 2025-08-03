@@ -1,0 +1,12 @@
+{
+  "rr_multiple": 2.0,
+  "commission_perc": 0.0,
+  "spread_points": 0.0001,
+  "start_date": "2024-06-01",
+  "end_date": "2024-06-30",
+  "total_signals": 144,
+  "tradeable_signals": 144,
+  "data_file": "data/csv_datasets/EURUSD_1H_2020-2024.csv",
+  "mode": "standard",
+  "optimizations_applied": null
+}

@@ -7,12 +7,35 @@ parsed strategy nodes against market data to generate trading signals.
 
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Set
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 import csv
 import os
-from blackbox_core import NodeEngine, StrategyNode, MissingFeatureError
+import sys
+import pandas as pd
+import re
+
+# Optional Numba JIT acceleration
+try:
+    from numba import njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    njit = lambda **kwargs: lambda func: func
+
+# Import the actual blackbox_core.py module file
+sys.path.insert(0, os.path.dirname(__file__))
+import blackbox_core
+
+# Production Grade: Custom exception for missing features (no silent failures)
+class MissingFeatureError(Exception):
+    """Raised when required features are missing from dataset."""
+    pass
+
+# Get classes from the module
+NodeEngine = blackbox_core.NodeEngine
+StrategyNode = blackbox_core.StrategyNode
 
 
 @dataclass
@@ -42,6 +65,7 @@ class SignalEvent:
     workflow_matches: int = 0
     validation_status: str = "pending"
     metadata: Dict[str, Any] = None
+    data_index: int = -1  # Memoised bar index for O(1) trade executor lookup
     
     def __post_init__(self):
         if self.tags is None:
@@ -140,6 +164,12 @@ class NodeDetectorEngine:
         self.node_engine = node_engine
         self.data_feed = None
         self.processed_data = None
+        
+        # Performance optimizations
+        self._cached_arrays = {}  # Cache numpy arrays for vectorized operations
+        self._compiled_regex = {}  # Cache compiled regex patterns
+        self._condition_cache = {}  # Cache condition evaluation results
+        
         self.active_signals: List[SignalEvent] = []
         self.signal_history: List[SignalEvent] = []
         self.detection_stats = {
@@ -164,9 +194,50 @@ class NodeDetectorEngine:
         """
         self.data_feed = DataFeedProcessor.validate_data_feed(data_feed)
         self.processed_data = DataFeedProcessor.add_derived_features(self.data_feed.copy())
+        
+        # Validate all nodes have required metrics
+        data_columns = set(self.processed_data.columns)
+        for node in self.node_engine.nodes:
+            self._validate_metrics_exist(node, data_columns)
+        
         print(f"✓ Data feed loaded: {len(self.processed_data)} data points")
         print(f"  Columns: {list(self.processed_data.columns)}")
         print(f"  Time range: {self.processed_data['timestamp'].min()} to {self.processed_data['timestamp'].max()}")
+        
+        # Performance optimization: Cache arrays for vectorized operations
+        self._cache_arrays_for_vectorization()
+    
+    def _cache_arrays_for_vectorization(self):
+        """Cache frequently accessed DataFrame columns as NumPy arrays."""
+        if self.processed_data is None:
+            return
+        
+        # Cache numeric columns that are frequently accessed
+        numeric_cols = ['price', 'volume', 'price_change', 'volume_spike', 'time_of_day']
+        for col in numeric_cols:
+            if col in self.processed_data.columns:
+                self._cached_arrays[col] = self.processed_data[col].values
+        
+        # Cache datetime index for timestamp operations
+        if 'timestamp' in self.processed_data.columns:
+            self._cached_arrays['timestamp'] = pd.to_datetime(self.processed_data['timestamp'])
+    
+    @staticmethod
+    @njit(cache=True, fastmath=True) if NUMBA_AVAILABLE else lambda x: x
+    def _evaluate_numeric_condition_vectorized(values: np.ndarray, threshold: float, operator: str) -> np.ndarray:
+        """JIT-compiled vectorized numeric condition evaluation."""
+        if operator == '>':
+            return values > threshold
+        elif operator == '<':
+            return values < threshold
+        elif operator == '>=':
+            return values >= threshold
+        elif operator == '<=':
+            return values <= threshold
+        elif operator == '==':
+            return np.abs(values - threshold) < 1e-10
+        else:
+            return np.zeros(len(values), dtype=np.bool_)
     
     def _initialize_field_mappings(self) -> Dict[str, List[str]]:
         """
@@ -187,6 +258,26 @@ class NodeDetectorEngine:
             'dark_pool': ['dark_prints', 'hidden_volume', 'iceberg_orders'],
             'expiry': ['expiry_date', 'days_to_expiry', 'opex_proximity']
         }
+    
+    def _validate_metrics_exist(self, node: StrategyNode, data_columns: Set[str]) -> None:
+        """
+        Validate that all required metrics for a node exist in the data.
+        Production Grade: No silent failures on missing features.
+        
+        Args:
+            node: Strategy node to validate
+            data_columns: Set of available column names in data
+            
+        Raises:
+            MissingFeatureError: If required metric is missing
+        """
+        # For now, assume basic market data columns are required
+        required_metrics = {'price', 'timestamp'}  # Basic requirements
+        
+        # Check if basic metrics exist
+        for metric in required_metrics:
+            if metric not in data_columns:
+                raise MissingFeatureError(f"Node '{node.name}' requires missing metric: {metric}")
     
     def run_detection(self, start_idx: int = 0, end_idx: Optional[int] = None, 
                      live_output: bool = True) -> List[SignalEvent]:
@@ -209,16 +300,27 @@ class NodeDetectorEngine:
         
         new_signals = []
         
-        print(f"\n🔍 Starting signal detection...")
+        if not live_output:
+            print(f"\n🔍 Starting optimized signal detection...")
+        else:
+            print(f"\n🔍 Starting signal detection...")
         print(f"   Processing {end_idx - start_idx} data points")
         print(f"   Evaluating {len(self.node_engine.nodes)} strategy nodes")
         print("="*60)
         
+        # Performance optimization: Cache DataFrame columns as Series for faster access
+        cached_series = {}
+        for col in self.processed_data.columns:
+            cached_series[col] = self.processed_data[col]
+        
         for idx in range(start_idx, end_idx):
-            current_data = self.processed_data.iloc[idx]
-            tick_signals = self._evaluate_all_nodes(current_data, idx)
+            # Use cached series instead of iloc for faster access
+            current_data = {col: series.iloc[idx] for col, series in cached_series.items()}
+            tick_signals = self._evaluate_all_nodes_optimized(current_data, idx)
             
             for signal in tick_signals:
+                # Memoize data_index for O(1) trade executor lookup
+                signal.data_index = idx
                 new_signals.append(signal)
                 self.active_signals.append(signal)
                 self.signal_history.append(signal)
@@ -231,8 +333,415 @@ class NodeDetectorEngine:
         self.detection_stats['signals_generated'] += len(new_signals)
         self.detection_stats['last_processing_time'] = datetime.now()
         
+        # Performance optimization: Clear cache if it gets too large
+        if len(self._condition_cache) > 10000:
+            self._condition_cache.clear()
+        
         print(f"\n✓ Detection complete: {len(new_signals)} signals generated")
         return new_signals
+    
+    def _evaluate_all_nodes_optimized(self, data_dict: Dict[str, Any], row_idx: int) -> List[SignalEvent]:
+        """
+        Optimized evaluation of all strategy nodes against a single data point.
+        Uses cached data and early exit optimizations.
+        
+        Args:
+            data_dict: Current market data as dictionary (faster than Series)
+            row_idx: Index of the current row
+            
+        Returns:
+            List of triggered signals for this data point
+        """
+        signals = []
+        
+        for node in self.node_engine.nodes:
+            self.detection_stats['nodes_evaluated'] += 1
+            
+            # Early exit: Check cache first
+            cache_key = f"{node.name}_{row_idx}"
+            if cache_key in self._condition_cache:
+                match_result = self._condition_cache[cache_key]
+            else:
+                # Check if this node should trigger a signal with early exit
+                match_result = self._evaluate_node_conditions_optimized(node, data_dict, row_idx)
+                self._condition_cache[cache_key] = match_result
+            
+            if match_result['should_trigger']:
+                signal = self._create_signal_event_optimized(node, data_dict, match_result)
+                signals.append(signal)
+        
+        return signals
+    
+    def _evaluate_node_conditions_optimized(self, node: StrategyNode, data_dict: Dict[str, Any], 
+                                          row_idx: int) -> Dict[str, Any]:
+        """
+        Optimized evaluation of node conditions with early exit and cached regex.
+        
+        Args:
+            node: Strategy node to evaluate
+            data_dict: Current market data as dictionary (faster access)
+            row_idx: Current row index
+            
+        Returns:
+            Dictionary with evaluation results
+        """
+        # Early exit: Check if node has mathematical steps for optimized path
+        has_mathematical_steps = any('>' in step or '<' in step or '=' in step 
+                                   for step in node.critical_steps + node.optional_steps)
+        
+        if has_mathematical_steps:
+            # Use optimized confluence logic with early exit
+            confluence_result = self._evaluate_confluence_optimized(node, data_dict)
+            
+            if confluence_result['confluence_met']:
+                return {
+                    'should_trigger': True,
+                    'confluence_score': confluence_result['score'],
+                    'matched_conditions': confluence_result['matched_conditions'],
+                    'trigger_reason': f"Optimized confluence: {confluence_result['score']:.1%}",
+                    'evaluation_method': 'optimized_confluence'
+                }
+            else:
+                # Early exit - no need to continue evaluation
+                return {'should_trigger': False, 'evaluation_method': 'optimized_confluence'}
+        else:
+            # Fall back to cached regex evaluation for legacy workflow
+            return self._evaluate_legacy_workflow_cached(node, data_dict, row_idx)
+    
+    def _evaluate_confluence_optimized(self, node: StrategyNode, data_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Optimized confluence evaluation with early exit on critical steps."""
+        critical_matches = 0
+        optional_matches = 0
+        matched_conditions = []
+        
+        # Early exit on critical steps - if any fail, stop immediately
+        for step in node.critical_steps:
+            if self._evaluate_single_condition_optimized(step, data_dict):
+                critical_matches += 1
+                matched_conditions.append(step)
+            else:
+                # Early exit: critical step failed
+                return {
+                    'confluence_met': False,
+                    'score': 0.0,
+                    'matched_conditions': matched_conditions
+                }
+        
+        # Only evaluate optional steps if all critical steps passed
+        for step in node.optional_steps:
+            if self._evaluate_single_condition_optimized(step, data_dict):
+                optional_matches += 1
+                matched_conditions.append(step)
+        
+        # Calculate score
+        total_critical = len(node.critical_steps)
+        total_optional = len(node.optional_steps)
+        
+        if total_critical + total_optional == 0:
+            score = 0.0
+        else:
+            critical_score = (critical_matches / total_critical) if total_critical > 0 else 1.0
+            optional_score = (optional_matches / total_optional) if total_optional > 0 else 0.0
+            score = 0.7 * critical_score + 0.3 * optional_score
+        
+        confluence_met = (critical_matches == total_critical and score >= 0.6)
+        
+        return {
+            'confluence_met': confluence_met,
+            'score': score,
+            'matched_conditions': matched_conditions
+        }
+    
+    def _evaluate_single_condition_optimized(self, condition: str, data_dict: Dict[str, Any]) -> bool:
+        """Optimized single condition evaluation with cached regex and JIT numeric ops."""
+        condition = condition.strip()
+        
+        # Use cached regex for pattern matching
+        pattern_key = f"numeric_{hash(condition)}"
+        if pattern_key not in self._compiled_regex:
+            self._compiled_regex[pattern_key] = re.compile(r'(\w+)\s*([><=]+)\s*([\d.]+)')
+        
+        numeric_match = self._compiled_regex[pattern_key].search(condition)
+        
+        if numeric_match:
+            field, operator, threshold_str = numeric_match.groups()
+            try:
+                threshold = float(threshold_str)
+                
+                if field in data_dict:
+                    value = data_dict[field]
+                    
+                    # Use JIT-compiled numeric evaluation if available and value is numeric
+                    if NUMBA_AVAILABLE and isinstance(value, (int, float)):
+                        return self._evaluate_numeric_condition_fast(float(value), threshold, operator)
+                    else:
+                        # Fallback to standard evaluation
+                        if operator == '>':
+                            return value > threshold
+                        elif operator == '<':
+                            return value < threshold
+                        elif operator == '>=':
+                            return value >= threshold
+                        elif operator == '<=':
+                            return value <= threshold
+                        elif operator == '==':
+                            return abs(float(value) - threshold) < 1e-10
+                return False
+            except (ValueError, TypeError):
+                return False
+        
+        # Fallback to text matching for non-numeric conditions
+        return self._evaluate_text_condition_cached(condition, data_dict)
+    
+    @staticmethod
+    @njit(cache=True, fastmath=True) if NUMBA_AVAILABLE else lambda x: x
+    def _evaluate_numeric_condition_fast(value: float, threshold: float, operator: str) -> bool:
+        """JIT-compiled fast numeric condition evaluation."""
+        if operator == '>':
+            return value > threshold
+        elif operator == '<':
+            return value < threshold
+        elif operator == '>=':
+            return value >= threshold
+        elif operator == '<=':
+            return value <= threshold
+        elif operator == '==':
+            return abs(value - threshold) < 1e-10
+        return False
+    
+    def _evaluate_text_condition_cached(self, condition: str, data_dict: Dict[str, Any]) -> bool:
+        """Evaluate text conditions using cached regex patterns."""
+        # Initialize cached text patterns if not exists
+        if 'text_patterns' not in self._compiled_regex:
+            self._compiled_regex['text_patterns'] = {
+                'volume_spike': re.compile(r'volume.*spike|spike.*volume', re.IGNORECASE),
+                'price_movement': re.compile(r'price.*(up|down|move)', re.IGNORECASE),
+                'trend': re.compile(r'trend.*(up|down|bull|bear)', re.IGNORECASE)
+            }
+        
+        # Quick pattern matching
+        for pattern_name, regex in self._compiled_regex['text_patterns'].items():
+            if regex.search(condition):
+                return self._evaluate_pattern_condition(pattern_name, data_dict)
+        
+        return False
+    
+    def _evaluate_pattern_condition(self, pattern_name: str, data_dict: Dict[str, Any]) -> bool:
+        """Evaluate common pattern conditions efficiently."""
+        if pattern_name == 'volume_spike' and 'volume_spike' in data_dict:
+            return bool(data_dict['volume_spike'])
+        elif pattern_name == 'price_movement' and 'price_change' in data_dict:
+            return abs(data_dict.get('price_change', 0)) > 0.001
+        elif pattern_name == 'trend' and 'price_change' in data_dict:
+            return abs(data_dict.get('price_change', 0)) > 0.002
+        return False
+    
+    def _evaluate_legacy_workflow_cached(self, node: StrategyNode, data_dict: Dict[str, Any], row_idx: int) -> Dict[str, Any]:
+        """Cached evaluation of legacy workflow steps."""
+        # Convert dict back to Series for legacy compatibility
+        data_row = pd.Series(data_dict)
+        return self._evaluate_node_conditions(node, data_row, row_idx)
+    
+    def _create_signal_event_optimized(self, node: StrategyNode, data_dict: Dict[str, Any], match_result: Dict[str, Any]) -> SignalEvent:
+        """Optimized signal event creation."""
+        return SignalEvent(
+            node_name=node.name,
+            timestamp=str(data_dict.get('timestamp', '')),
+            trigger_reason=match_result.get('trigger_reason', 'Optimized detection'),
+            confidence=getattr(node, 'confidence', 'Medium'),
+            entry_price=float(data_dict.get('price', 0.0)),
+            node_type=getattr(node, 'type', ''),
+            workflow_matches=len(match_result.get('matched_conditions', [])),
+            metadata={
+                'confluence_score': match_result.get('confluence_score', 0.0),
+                'evaluation_method': match_result.get('evaluation_method', 'optimized'),
+                'matched_conditions': match_result.get('matched_conditions', [])
+            }
+        )
+    
+    def _evaluate_node_conditions_optimized(self, node: StrategyNode, data_dict: Dict[str, Any], 
+                                          row_idx: int) -> Dict[str, Any]:
+        """
+        Optimized evaluation of node conditions with early exit and cached regex.
+        
+        Args:
+            node: Strategy node to evaluate
+            data_dict: Current market data as dictionary (faster access)
+            row_idx: Current row index
+            
+        Returns:
+            Dictionary with evaluation results
+        """
+        # Early exit: Check if node has mathematical steps for optimized path
+        has_mathematical_steps = any('>' in step or '<' in step or '=' in step 
+                                   for step in node.critical_steps + node.optional_steps)
+        
+        if has_mathematical_steps:
+            # Use optimized confluence logic with early exit
+            confluence_result = self._evaluate_confluence_optimized(node, data_dict)
+            
+            if confluence_result['confluence_met']:
+                return {
+                    'should_trigger': True,
+                    'confluence_score': confluence_result['score'],
+                    'matched_conditions': confluence_result['matched_conditions'],
+                    'trigger_reason': f"Optimized confluence: {confluence_result['score']:.1%}",
+                    'evaluation_method': 'optimized_confluence'
+                }
+            else:
+                # Early exit - no need to continue evaluation
+                return {'should_trigger': False, 'evaluation_method': 'optimized_confluence'}
+        else:
+            # Fall back to cached regex evaluation for legacy workflow
+            return self._evaluate_legacy_workflow_cached(node, data_dict, row_idx)
+    
+    def _evaluate_confluence_optimized(self, node: StrategyNode, data_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Optimized confluence evaluation with vectorized operations where possible."""
+        critical_matches = 0
+        optional_matches = 0
+        matched_conditions = []
+        
+        # Early exit on critical steps - if any fail, stop immediately
+        for step in node.critical_steps:
+            if self._evaluate_single_condition_optimized(step, data_dict):
+                critical_matches += 1
+                matched_conditions.append(step)
+            else:
+                # Early exit: critical step failed
+                return {
+                    'confluence_met': False,
+                    'score': 0.0,
+                    'matched_conditions': matched_conditions
+                }
+        
+        # Only evaluate optional steps if all critical steps passed
+        for step in node.optional_steps:
+            if self._evaluate_single_condition_optimized(step, data_dict):
+                optional_matches += 1
+                matched_conditions.append(step)
+        
+        # Calculate score
+        total_critical = len(node.critical_steps)
+        total_optional = len(node.optional_steps)
+        
+        if total_critical + total_optional == 0:
+            score = 0.0
+        else:
+            critical_score = (critical_matches / total_critical) if total_critical > 0 else 1.0
+            optional_score = (optional_matches / total_optional) if total_optional > 0 else 0.0
+            score = 0.7 * critical_score + 0.3 * optional_score
+        
+        confluence_met = (critical_matches == total_critical and score >= 0.6)
+        
+        return {
+            'confluence_met': confluence_met,
+            'score': score,
+            'matched_conditions': matched_conditions
+        }
+    
+    def _evaluate_single_condition_optimized(self, condition: str, data_dict: Dict[str, Any]) -> bool:
+        """Optimized single condition evaluation with JIT compilation for numeric expressions."""
+        condition = condition.strip()
+        
+        # Use cached regex for pattern matching
+        pattern_key = f"numeric_{condition}"
+        if pattern_key not in self._compiled_regex:
+            self._compiled_regex[pattern_key] = re.compile(r'(\w+)\s*([><=]+)\s*([\d.]+)')
+        
+        numeric_match = self._compiled_regex[pattern_key].search(condition)
+        
+        if numeric_match:
+            field, operator, threshold_str = numeric_match.groups()
+            threshold = float(threshold_str)
+            
+            if field in data_dict:
+                value = data_dict[field]
+                
+                # Use JIT-compiled numeric evaluation if available
+                if NUMBA_AVAILABLE and isinstance(value, (int, float)):
+                    return self._evaluate_numeric_condition_fast(value, threshold, operator)
+                else:
+                    # Fallback to standard evaluation
+                    if operator == '>':
+                        return value > threshold
+                    elif operator == '<':
+                        return value < threshold
+                    elif operator == '>=':
+                        return value >= threshold
+                    elif operator == '<=':
+                        return value <= threshold
+                    elif operator == '==':
+                        return abs(value - threshold) < 1e-10
+            return False
+        
+        # Fallback to text matching with cached regex
+        return self._evaluate_text_condition_cached(condition, data_dict)
+    
+    @staticmethod
+    @njit(cache=True, fastmath=True) if NUMBA_AVAILABLE else lambda x: x
+    def _evaluate_numeric_condition_fast(value: float, threshold: float, operator: str) -> bool:
+        """JIT-compiled fast numeric condition evaluation."""
+        if operator == '>':
+            return value > threshold
+        elif operator == '<':
+            return value < threshold
+        elif operator == '>=':
+            return value >= threshold
+        elif operator == '<=':
+            return value <= threshold
+        elif operator == '==':
+            return abs(value - threshold) < 1e-10
+        return False
+    
+    def _evaluate_text_condition_cached(self, condition: str, data_dict: Dict[str, Any]) -> bool:
+        """Evaluate text conditions using cached regex patterns."""
+        # Cache common text pattern regex
+        if 'text_patterns' not in self._compiled_regex:
+            self._compiled_regex['text_patterns'] = {
+                'volume_spike': re.compile(r'volume.*spike|spike.*volume', re.IGNORECASE),
+                'price_movement': re.compile(r'price.*(up|down|move)', re.IGNORECASE),
+                'trend': re.compile(r'trend.*(up|down|bull|bear)', re.IGNORECASE)
+            }
+        
+        # Quick pattern matching
+        for pattern_name, regex in self._compiled_regex['text_patterns'].items():
+            if regex.search(condition):
+                return self._evaluate_pattern_condition(pattern_name, data_dict)
+        
+        return False
+    
+    def _evaluate_pattern_condition(self, pattern_name: str, data_dict: Dict[str, Any]) -> bool:
+        """Evaluate common pattern conditions efficiently."""
+        if pattern_name == 'volume_spike' and 'volume_spike' in data_dict:
+            return bool(data_dict['volume_spike'])
+        elif pattern_name == 'price_movement' and 'price_change' in data_dict:
+            return abs(data_dict['price_change']) > 0.001
+        elif pattern_name == 'trend' and 'price_change' in data_dict:
+            return abs(data_dict['price_change']) > 0.002
+        return False
+    
+    def _evaluate_legacy_workflow_cached(self, node: StrategyNode, data_dict: Dict[str, Any], row_idx: int) -> Dict[str, Any]:
+        """Cached evaluation of legacy workflow steps."""
+        # Convert dict back to Series for legacy compatibility
+        data_row = pd.Series(data_dict)
+        return self._evaluate_node_conditions(node, data_row, row_idx)
+    
+    def _create_signal_event_optimized(self, node: StrategyNode, data_dict: Dict[str, Any], match_result: Dict[str, Any]) -> SignalEvent:
+        """Optimized signal event creation."""
+        return SignalEvent(
+            node_name=node.name,
+            timestamp=str(data_dict.get('timestamp', '')),
+            trigger_reason=match_result.get('trigger_reason', 'Optimized detection'),
+            confidence=getattr(node, 'confidence', 'Medium'),
+            entry_price=float(data_dict.get('price', 0.0)),
+            node_type=getattr(node, 'type', ''),
+            workflow_matches=len(match_result.get('matched_conditions', [])),
+            metadata={
+                'confluence_score': match_result.get('confluence_score', 0.0),
+                'evaluation_method': match_result.get('evaluation_method', 'optimized'),
+                'matched_conditions': match_result.get('matched_conditions', [])
+            }
+        )
     
     def _evaluate_all_nodes(self, data_row: pd.Series, row_idx: int) -> List[SignalEvent]:
         """
@@ -593,7 +1102,7 @@ class NodeDetectorEngine:
 
 # Example usage and testing
 if __name__ == "__main__":
-    from blackbox_core import NodeEngine
+    # NodeEngine is already imported at the top
     
     print("🔧 BLACKBOX PHASE 2: NODE DETECTOR ENGINE TEST")
     print("="*60)

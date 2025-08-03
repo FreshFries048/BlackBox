@@ -19,10 +19,14 @@ from datetime import datetime, timedelta
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
-from blackbox_core import NodeEngine
+# Import the actual blackbox_core.py module file  
+import blackbox_core
 from node_detector import NodeDetectorEngine
 from trade_executor import TradeExecutorEngine, RiskManager
 from data_feed import DataFeedProcessor
+
+# Get NodeEngine from the module
+NodeEngine = blackbox_core.NodeEngine
 
 
 class BacktestRunner:

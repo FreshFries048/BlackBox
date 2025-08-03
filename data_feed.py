@@ -8,7 +8,15 @@ for the BlackBox trading system.
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Any
-from blackbox_core import MissingFeatureError
+import sys
+import os
+
+# Import the actual blackbox_core.py module file
+sys.path.insert(0, os.path.dirname(__file__))
+import blackbox_core
+
+# Get exception from the module
+MissingFeatureError = blackbox_core.MissingFeatureError
 
 
 class DataFeedProcessor:

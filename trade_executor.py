@@ -73,14 +73,16 @@ class Position:
             self.signal_metadata = {}
         self.current_price = self.entry_price
     
-    def update_current_price(self, new_price: float, current_index: int, timestamp: str):
+    def update_current_price(self, new_price: float, current_index: int, timestamp: str, risk_manager=None):
         """
         Update the current price and check for exit conditions.
+        Production Grade: Now applies realistic trading costs via risk_manager.
         
         Args:
             new_price: Current market price
             current_index: Current data index
             timestamp: Current timestamp
+            risk_manager: Risk manager for trading cost calculations
             
         Returns:
             True if position should be closed, False otherwise
@@ -92,39 +94,53 @@ class Position:
         if self.side.upper() == "LONG":
             # LONG position: SL below entry, TP above entry
             if new_price <= self.stop_loss:
-                self._close_position(new_price, timestamp, "STOP_LOSS", current_index)
+                self._close_position(new_price, timestamp, "STOP_LOSS", current_index, risk_manager)
                 return True
             elif new_price >= self.take_profit:
-                self._close_position(new_price, timestamp, "TAKE_PROFIT", current_index)
+                self._close_position(new_price, timestamp, "TAKE_PROFIT", current_index, risk_manager)
                 return True
         else:  # SHORT position
             # SHORT position: SL above entry, TP below entry
             if new_price >= self.stop_loss:
-                self._close_position(new_price, timestamp, "STOP_LOSS", current_index)
+                self._close_position(new_price, timestamp, "STOP_LOSS", current_index, risk_manager)
                 return True
             elif new_price <= self.take_profit:
-                self._close_position(new_price, timestamp, "TAKE_PROFIT", current_index)
+                self._close_position(new_price, timestamp, "TAKE_PROFIT", current_index, risk_manager)
                 return True
         
         # Check duration limit
         if self.duration_limit and self.duration_held >= self.duration_limit:
-            self._close_position(new_price, timestamp, "TIMEOUT", current_index)
+            self._close_position(new_price, timestamp, "TIMEOUT", current_index, risk_manager)
             return True
         
         return False
     
-    def _close_position(self, exit_price: float, exit_timestamp: str, reason: str, exit_index: int):
-        """Close the position and calculate PnL."""
+    def _close_position(self, exit_price: float, exit_timestamp: str, reason: str, exit_index: int, risk_manager=None):
+        """
+        Close the position and calculate P&L.
+        Production Grade: Now applies realistic trading costs.
+        """
         self.exit_price = exit_price
         self.exit_timestamp = exit_timestamp
         self.exit_reason = reason
         self.exit_index = exit_index
         
-        # Calculate PnL based on position side
+        # Calculate gross PnL based on position side
         if self.side.upper() == "LONG":
-            self.pnl_points = (exit_price - self.entry_price) * self.position_size
+            gross_pnl = (exit_price - self.entry_price) * self.position_size
         else:  # SHORT
-            self.pnl_points = (self.entry_price - exit_price) * self.position_size
+            gross_pnl = (self.entry_price - exit_price) * self.position_size
+        
+        # Production Grade: Apply realistic trading costs
+        if risk_manager and hasattr(risk_manager, 'apply_trading_costs'):
+            self.pnl_points = risk_manager.apply_trading_costs(
+                gross_pnl=gross_pnl,
+                entry_price=self.entry_price,
+                position_size=self.position_size
+            )
+        else:
+            # Fallback to gross PnL if no risk manager
+            self.pnl_points = gross_pnl
         
         self.pnl_percent = (self.pnl_points / self.entry_price) * 100
         
@@ -138,10 +154,15 @@ class Position:
         else:
             self.status = PositionStatus.CLOSED_MANUAL
     
-    def force_close(self, exit_price: float, exit_timestamp: str, exit_index: int):
-        """Force close position (e.g., end of data)."""
-        if self.status == PositionStatus.OPEN:
-            self._close_position(exit_price, exit_timestamp, "FORCE_CLOSE", exit_index)
+    def force_close(self, exit_price: float, exit_timestamp: str, exit_index: int, risk_manager=None):
+        """
+        Force close position (e.g., end of data).
+        Production Grade: Now applies realistic trading costs.
+        """
+        if self.status != PositionStatus.OPEN:
+            return
+        
+        self._close_position(exit_price, exit_timestamp, "FORCE_CLOSE", exit_index, risk_manager)
     
     def is_open(self) -> bool:
         """Check if position is still open."""
@@ -163,10 +184,12 @@ class Position:
 class RiskManager:
     """
     Enhanced risk management with ATR-based stops and position sizing.
+    Production Grade: Now includes realistic trading costs and commission handling.
     """
     
     def __init__(self, default_stop_loss_pct: float = 1.5, default_take_profit_pct: float = 2.5,
-                 risk_pct: float = 0.02, account_equity: float = 100000.0, rr_multiple: float = 3.0):
+                 risk_pct: float = 0.02, account_equity: float = 100000.0, rr_multiple: float = 3.0,
+                 commission_pct: float = 0.0, spread_points: float = 0.0001):
         """
         Initialize risk manager.
         
@@ -176,12 +199,42 @@ class RiskManager:
             risk_pct: Risk percentage per trade (default 2%)
             account_equity: Account equity for position sizing
             rr_multiple: Risk-reward multiple (default 3.0)
+            commission_pct: Commission percentage per trade (Production Grade)
+            spread_points: Spread in points (Production Grade)
         """
         self.default_stop_loss_pct = default_stop_loss_pct
         self.default_take_profit_pct = default_take_profit_pct
         self.risk_pct = risk_pct
         self.account_equity = account_equity
         self.rr_multiple = rr_multiple
+        
+        # Production Grade: Trading costs
+        self.commission_pct = commission_pct
+        self.spread_points = spread_points
+    
+    def apply_trading_costs(self, gross_pnl: float, entry_price: float, position_size: float = 1.0) -> float:
+        """
+        Apply realistic trading costs to P&L calculation.
+        Production Grade: No silent failures on trading costs.
+        
+        Args:
+            gross_pnl: Gross P&L before costs
+            entry_price: Entry price of the trade
+            position_size: Position size
+            
+        Returns:
+            Net P&L after trading costs
+        """
+        # Calculate commission (round trip)
+        commission_cost = (entry_price * position_size * self.commission_pct / 100) * 2
+        
+        # Calculate spread cost
+        spread_cost = self.spread_points * position_size / 10000  # Convert to currency
+        
+        # Apply costs
+        net_pnl = gross_pnl - commission_cost - spread_cost
+        
+        return net_pnl
     
     def calculate_stop_loss(self, entry_price: float, confidence: str, 
                            atr: Optional[float] = None, side: str = "LONG") -> float:
@@ -383,19 +436,15 @@ class TradeExecutorEngine:
         sorted_signals = sorted(signals, key=lambda s: pd.to_datetime(s.timestamp))
         trades_executed = 0
         
-        # Create a mapping of signal timestamps to market data indices
+        # Create a mapping of signal timestamps to market data indices (OPTIMIZED)
         signal_indices = {}
         for signal in sorted_signals:
-            signal_time = pd.to_datetime(signal.timestamp)
-            # Find the closest market data index for this signal
-            closest_idx = 0
-            min_diff = float('inf')
-            for idx, row in self.market_data.iterrows():
-                time_diff = abs((pd.to_datetime(row['timestamp']) - signal_time).total_seconds())
-                if time_diff < min_diff:
-                    min_diff = time_diff
-                    closest_idx = idx
-            signal_indices[signal.timestamp] = closest_idx
+            # Use the memoized data_index from signal detection phase
+            if hasattr(signal, 'data_index') and signal.data_index is not None:
+                signal_indices[signal.timestamp] = signal.data_index
+            else:
+                # Fallback to optimized binary search if data_index not available
+                signal_indices[signal.timestamp] = self._find_signal_index_optimized(signal)
         
         # Process each market data point chronologically
         for current_idx in range(len(self.market_data)):
@@ -432,7 +481,7 @@ class TradeExecutorEngine:
                 # Only update positions that were opened at or before this index
                 if position.entry_index <= current_idx:
                     should_close = position.update_current_price(
-                        current_price, current_idx, current_timestamp
+                        current_price, current_idx, current_timestamp, self.risk_manager
                     )
                     
                     if should_close:
@@ -457,7 +506,7 @@ class TradeExecutorEngine:
             
             remaining_positions = self.active_positions.copy()
             for position in remaining_positions:
-                position.force_close(final_price, final_timestamp, len(self.market_data) - 1)
+                position.force_close(final_price, final_timestamp, len(self.market_data) - 1, self.risk_manager)
                 self.active_positions.remove(position)
                 self.closed_trades.append(position)
                 print(f"🔒 FORCE CLOSED: {position.node_name} (End of data)")
@@ -593,8 +642,8 @@ class TradeExecutorEngine:
         elif any(keyword in text_to_analyze for keyword in long_keywords):
             return "LONG"
         
-        # Analyze market context at the signal timestamp
-        signal_index = self._find_signal_index(signal.timestamp)
+        # Analyze market context at the signal timestamp  
+        signal_index = self._find_signal_index_optimized(signal)
         if signal_index is not None:
             market_bias = self._analyze_market_context(signal_index)
             if market_bias:
@@ -608,8 +657,17 @@ class TradeExecutorEngine:
         # Fallback to market momentum analysis
         return self._analyze_momentum_bias(signal_index) if signal_index is not None else "LONG"
     
+    def _find_signal_index_optimized(self, signal) -> Optional[int]:
+        """Optimized signal index lookup using memoized data_index."""
+        # Use memoized data_index if available (O(1) lookup)
+        if hasattr(signal, 'data_index') and signal.data_index >= 0:
+            return signal.data_index
+        
+        # Fallback to timestamp search for backwards compatibility
+        return self._find_signal_index(signal.timestamp)
+    
     def _find_signal_index(self, timestamp: str) -> Optional[int]:
-        """Find the index corresponding to a signal timestamp."""
+        """Find the index corresponding to a signal timestamp (legacy method)."""
         try:
             signal_time = pd.to_datetime(timestamp)
             data_times = pd.to_datetime(self.market_data['timestamp'])
@@ -694,7 +752,7 @@ class TradeExecutorEngine:
     def _analyze_institutional_flow(self, signal: SignalEvent) -> Optional[str]:
         """Analyze institutional flow patterns for directional bias."""
         # Look for accumulation vs distribution patterns
-        signal_index = self._find_signal_index(signal.timestamp)
+        signal_index = self._find_signal_index_optimized(signal)
         if signal_index is None:
             return None
             
@@ -724,7 +782,7 @@ class TradeExecutorEngine:
     def _analyze_gamma_context(self, signal: SignalEvent) -> Optional[str]:
         """Analyze gamma exposure context for directional bias."""
         # Gamma effects can be complex - for now use price momentum
-        signal_index = self._find_signal_index(signal.timestamp)
+        signal_index = self._find_signal_index_optimized(signal)
         if signal_index is None:
             return None
             
@@ -810,7 +868,7 @@ class TradeExecutorEngine:
                 # Only update positions that were opened at or before this index
                 if position.entry_index <= idx:
                     should_close = position.update_current_price(
-                        current_price, idx, current_timestamp
+                        current_price, idx, current_timestamp, self.risk_manager
                     )
                     
                     if should_close:
@@ -842,7 +900,7 @@ class TradeExecutorEngine:
             final_timestamp = final_row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
             
             for position in remaining_positions:
-                position.force_close(final_price, final_timestamp, len(self.market_data) - 1)
+                position.force_close(final_price, final_timestamp, len(self.market_data) - 1, self.risk_manager)
                 self.active_positions.remove(position)
                 self.closed_trades.append(position)
                 positions_closed += 1
