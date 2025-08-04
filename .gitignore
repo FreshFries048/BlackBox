@@ -12,6 +12,17 @@ __pycache__/
 .coverage
 .pytest_cache/
 
+# Generated results and outputs
+results/
+logs/
+*.log
+results/*.csv
+results/*.parquet
+
+# Old/deprecated directories
+blackbox_config_old/
+src/
+
 # IDE
 .vscode/
 .idea/
@@ -20,10 +31,10 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-logs/*.log
-
 # Temporary files
 *.tmp
 *.temp
+
+# Database files (but keep schema)
+*.db
+*.sqlite
