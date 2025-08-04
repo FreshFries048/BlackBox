@@ -7,6 +7,7 @@ into actual trading positions with stop-loss, take-profit, and risk management.
 
 import pandas as pd
 import numpy as np
+import random
 from typing import List, Dict, Any, Optional, Union
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
@@ -51,7 +52,7 @@ class Position:
     take_profit: float
     confidence: str
     position_size: float = 1.0
-    duration_limit: Optional[int] = 20
+    duration_limit: Optional[int] = 200
     signal_metadata: Dict[str, Any] = None
     side: str = "LONG"
     
@@ -188,8 +189,9 @@ class RiskManager:
     """
     
     def __init__(self, default_stop_loss_pct: float = 1.5, default_take_profit_pct: float = 2.5,
-                 risk_pct: float = 0.02, account_equity: float = 100000.0, rr_multiple: float = 3.0,
-                 commission_pct: float = 0.0, spread_points: float = 0.0001):
+                 risk_pct: float = 0.02, account_equity: float = 100000.0, rr_multiple: float = 2.0,
+                 commission_pct: float = 0.0, spread_points: float = 0.0001,
+                 leverage: float = 1.0, max_leverage: float = 50.0):
         """
         Initialize risk manager.
         
@@ -198,9 +200,11 @@ class RiskManager:
             default_take_profit_pct: Default take profit percentage (fallback)
             risk_pct: Risk percentage per trade (default 2%)
             account_equity: Account equity for position sizing
-            rr_multiple: Risk-reward multiple (default 3.0)
+            rr_multiple: Risk-reward multiple (default 2.0)
             commission_pct: Commission percentage per trade (Production Grade)
             spread_points: Spread in points (Production Grade)
+            leverage: Leverage multiplier (default 1.0 = no leverage)
+            max_leverage: Maximum allowed leverage (default 50.0)
         """
         self.default_stop_loss_pct = default_stop_loss_pct
         self.default_take_profit_pct = default_take_profit_pct
@@ -211,6 +215,10 @@ class RiskManager:
         # Production Grade: Trading costs
         self.commission_pct = commission_pct
         self.spread_points = spread_points
+        
+        # Leverage controls
+        self.leverage = max(1.0, min(leverage, max_leverage))  # Ensure leverage is between 1.0 and max_leverage
+        self.max_leverage = max_leverage
     
     def apply_trading_costs(self, gross_pnl: float, entry_price: float, position_size: float = 1.0) -> float:
         """
@@ -324,7 +332,7 @@ class RiskManager:
     def calculate_position_size(self, entry_price: float, stop_loss: float, 
                                confidence: str, signal_matches: int) -> float:
         """
-        Calculate position size based on risk percentage and stop distance.
+        Calculate position size based on risk percentage and stop distance, with leverage support.
         
         Args:
             entry_price: Entry price for the position
@@ -333,7 +341,7 @@ class RiskManager:
             signal_matches: Number of signal matches
             
         Returns:
-            Position size
+            Position size (in forex lot equivalents)
         """
         # Calculate stop distance in price units
         stop_distance = abs(entry_price - stop_loss)
@@ -341,9 +349,15 @@ class RiskManager:
         if stop_distance == 0:
             return 1.0  # Default size if no stop distance
         
-        # Calculate position size based on risk percentage
+        # Calculate base position size based on risk percentage
         risk_amount = self.account_equity * self.risk_pct
-        position_size = risk_amount / stop_distance
+        
+        # For forex, we want position size in lot units (100,000 units per standard lot)
+        # Calculate how many units we can afford to risk
+        max_units_to_risk = risk_amount / stop_distance
+        
+        # Convert to lot size (1 lot = 100,000 units for major pairs)
+        base_lot_size = max_units_to_risk / 100000.0
         
         # Apply confidence multiplier
         confidence_multiplier = 1.0
@@ -357,10 +371,76 @@ class RiskManager:
         # Apply signal quality multiplier
         signal_multiplier = min(2.0, 1.0 + (signal_matches * 0.1))
         
-        final_size = position_size * confidence_multiplier * signal_multiplier
+        # Calculate size with multipliers
+        adjusted_lot_size = base_lot_size * confidence_multiplier * signal_multiplier
+        
+        # LEVERAGE CORRECTION: Leverage affects margin requirement, NOT position size
+        # We want to maintain the SAME risk amount regardless of leverage
+        # Higher leverage = same position size but lower margin requirement
+        
+        final_lot_size = adjusted_lot_size  # Don't multiply position size by leverage
+        
+        # Convert to units for validation
+        position_units = final_lot_size * 100000.0
+        
+        # Validate leverage limits (this now properly uses leverage for margin calculation)
+        try:
+            self._validate_leverage_limits(position_units, entry_price)
+        except ValueError as e:
+            # If validation fails, reduce position size to maximum allowable
+            max_notional = self.account_equity * 5.0  # Conservative max
+            max_units = max_notional / entry_price
+            final_lot_size = max_units / 100000.0
         
         # Cap position size to reasonable limits
-        return min(final_size, 10.0)  # Max 10x normal size
+        max_lot_size = 10.0  # Maximum 10 lots per trade
+        final_lot_size = min(final_lot_size, max_lot_size)
+        
+        # Convert back to units for the position system
+        return final_lot_size * 100000.0
+    
+    def _validate_leverage_limits(self, position_size: float, entry_price: float):
+        """
+        Validate that leveraged position doesn't exceed margin requirements.
+        
+        Args:
+            position_size: Calculated position size (in lots/units)
+            entry_price: Entry price for the trade
+            
+        Raises:
+            ValueError: If insufficient margin for leveraged position
+        """
+        # For forex, position_size represents lot units (e.g., 1.0 = 1 lot = 100,000 units)
+        # But our calculation seems to be in absolute units, so let's normalize it
+        
+        # Calculate notional value (total exposure)
+        notional_value = position_size * entry_price
+        
+        # For forex trading, we need to be more realistic about position sizes
+        # Let's cap the notional value to something reasonable
+        max_notional_per_trade = self.account_equity * 10.0  # Max 10x account for any single trade
+        
+        if notional_value > max_notional_per_trade:
+            # Instead of raising an error, let's adjust the position size
+            adjusted_position_size = max_notional_per_trade / entry_price
+            raise ValueError(
+                f"Position size too large. Notional: ${notional_value:.2f}, "
+                f"Max allowed: ${max_notional_per_trade:.2f}. "
+                f"Consider reducing position size to {adjusted_position_size:.2f}"
+            )
+        
+        # Calculate required margin (notional / leverage)
+        required_margin = notional_value / self.leverage
+        
+        # Ensure we don't use more than 50% of account equity as margin per trade
+        max_margin_per_trade = self.account_equity * 0.5
+        
+        if required_margin > max_margin_per_trade:
+            raise ValueError(
+                f"Insufficient margin for leveraged position. "
+                f"Required: ${required_margin:.2f}, Available: ${max_margin_per_trade:.2f} "
+                f"(Leverage: {self.leverage}:1, Notional: ${notional_value:.2f})"
+            )
 
 
 class TradeExecutorEngine:
@@ -436,15 +516,19 @@ class TradeExecutorEngine:
         sorted_signals = sorted(signals, key=lambda s: pd.to_datetime(s.timestamp))
         trades_executed = 0
         
-        # Create a mapping of signal timestamps to market data indices (OPTIMIZED)
-        signal_indices = {}
+        # Create optimized signal mapping by index (PERFORMANCE CRITICAL)
+        signals_by_index = {}
         for signal in sorted_signals:
             # Use the memoized data_index from signal detection phase
             if hasattr(signal, 'data_index') and signal.data_index is not None:
-                signal_indices[signal.timestamp] = signal.data_index
+                idx = signal.data_index
             else:
                 # Fallback to optimized binary search if data_index not available
-                signal_indices[signal.timestamp] = self._find_signal_index_optimized(signal)
+                idx = self._find_signal_index_optimized(signal)
+            
+            if idx not in signals_by_index:
+                signals_by_index[idx] = []
+            signals_by_index[idx].append(signal)
         
         # Process each market data point chronologically
         for current_idx in range(len(self.market_data)):
@@ -453,8 +537,8 @@ class TradeExecutorEngine:
             current_time = current_row['timestamp']
             current_timestamp = current_time.strftime('%Y-%m-%d %H:%M:%S')
             
-            # Execute any signals that occur at this time point
-            signals_at_this_time = [s for s in sorted_signals if signal_indices.get(s.timestamp) == current_idx]
+            # Get signals at this time point (O(1) lookup)
+            signals_at_this_time = signals_by_index.get(current_idx, [])
             
             for signal in signals_at_this_time:
                 if self._should_execute_signal(signal):
@@ -819,12 +903,14 @@ class TradeExecutorEngine:
             recent_prices = data['price'][index-lookback:index+1]
             momentum = recent_prices.iloc[-1] - recent_prices.iloc[0]
             
-            # Add some noise to avoid perfect alternation while maintaining bias
+            # Use deterministic seed based on index and price (rounded for consistency)
             import random
-            random.seed(index + hash(str(recent_prices.iloc[-1])))  # Deterministic but not perfectly alternating
+            price_rounded = round(recent_prices.iloc[-1], 4)  # Round to 4 decimal places
+            deterministic_seed = index + int(price_rounded * 10000) % 1000000
+            random.seed(deterministic_seed)
             
             if abs(momentum) < data['price'].iloc[index] * 0.0005:  # Very small move
-                # For neutral momentum, add slight randomness with trend bias
+                # For neutral momentum, add deterministic randomness with trend bias
                 return "LONG" if random.random() > 0.45 else "SHORT"  # 55% LONG bias
             else:
                 # Follow momentum direction
@@ -1066,6 +1152,34 @@ class TradeExecutorEngine:
         avg_win = np.mean([t.pnl_points for t in winning_trades]) if winning_trades else 0
         avg_loss = np.mean([t.pnl_points for t in losing_trades]) if losing_trades else 0
         
+        # Exit reason analysis
+        exit_reasons = {}
+        for trade in self.closed_trades:
+            reason = trade.exit_reason
+            if reason not in exit_reasons:
+                exit_reasons[reason] = []
+            exit_reasons[reason].append(trade.pnl_points)
+        
+        # Calculate exit reason statistics
+        exit_analysis = {}
+        for reason, pnls in exit_reasons.items():
+            exit_analysis[reason.lower().replace('_', '_')] = {
+                'count': len(pnls),
+                'percentage': (len(pnls) / total_trades) * 100,
+                'avg_pnl': np.mean(pnls),
+                'total_pnl': sum(pnls)
+            }
+        
+        # Ensure all exit types are represented
+        for exit_type in ['take_profit', 'stop_loss', 'timeout', 'force_close']:
+            if exit_type not in exit_analysis:
+                exit_analysis[exit_type] = {
+                    'count': 0,
+                    'percentage': 0.0,
+                    'avg_pnl': 0.0,
+                    'total_pnl': 0.0
+                }
+        
         # Per-node metrics
         node_performance = {}
         for trade in self.closed_trades:
@@ -1102,6 +1216,7 @@ class TradeExecutorEngine:
             'avg_win': avg_win,
             'avg_loss': avg_loss,
             'profit_factor': abs(avg_win / avg_loss) if avg_loss != 0 else float('inf'),
+            'exit_analysis': exit_analysis,
             'node_performance': node_performance,
             'side_performance': side_performance
         }
@@ -1219,6 +1334,79 @@ class TradeExecutorEngine:
         print(f"Average Win: {metrics['avg_win']:.2f} points")
         print(f"Average Loss: {metrics['avg_loss']:.2f} points")
         print(f"Profit Factor: {metrics['profit_factor']:.2f}")
+        
+        # Exit Reason Analysis
+        if 'exit_analysis' in metrics:
+            exit_stats = metrics['exit_analysis']
+            print(f"\n🚪 EXIT REASON BREAKDOWN")
+            print("="*60)
+            print(f"Take Profit: {exit_stats['take_profit']['count']} trades ({exit_stats['take_profit']['percentage']:.1f}%)")
+            print(f"  Avg PnL: {exit_stats['take_profit']['avg_pnl']:.4f} points")
+            print(f"Stop Loss: {exit_stats['stop_loss']['count']} trades ({exit_stats['stop_loss']['percentage']:.1f}%)")
+            print(f"  Avg PnL: {exit_stats['stop_loss']['avg_pnl']:.4f} points")
+            print(f"Timeout: {exit_stats['timeout']['count']} trades ({exit_stats['timeout']['percentage']:.1f}%)")
+            print(f"  Avg PnL: {exit_stats['timeout']['avg_pnl']:.4f} points")
+            print(f"Force Close: {exit_stats['force_close']['count']} trades ({exit_stats['force_close']['percentage']:.1f}%)")
+            print(f"  Avg PnL: {exit_stats['force_close']['avg_pnl']:.4f} points")
+            
+            print(f"\n📏 ACTUAL vs THEORETICAL RISK-REWARD")
+            print("="*60)
+            print(f"Theoretical R:R: 6.0:1 (with multipliers 6.6-12.5:1)")
+            print(f"Actual Avg Win: {metrics['avg_win']:.4f} points")
+            print(f"Actual Avg Loss: {abs(metrics['avg_loss']):.4f} points")
+            actual_rr = abs(metrics['avg_win'] / metrics['avg_loss']) if metrics['avg_loss'] != 0 else 0
+            print(f"Actual R:R Achieved: {actual_rr:.2f}:1")
+            
+            # Enhanced exit reason impact analysis
+            tp_trades = exit_stats['take_profit']['count']
+            sl_trades = exit_stats['stop_loss']['count']
+            timeout_trades = exit_stats['timeout']['count']
+            force_close_trades = exit_stats['force_close']['count']
+            
+            # Calculate theoretical performance with different assumptions
+            theoretical_win_pnl = 300  # 6 * 50 pips (assuming 50 pip SL)
+            theoretical_loss_pnl = -50  # 50 pip SL
+            
+            print(f"\n🔍 PERFORMANCE GAP ANALYSIS")
+            print("="*60)
+            
+            # Theoretical calculation with 6:1 RR
+            theoretical_pnl_6to1 = (metrics['win_rate']/100 * theoretical_win_pnl) + ((100-metrics['win_rate'])/100 * theoretical_loss_pnl)
+            theoretical_total_6to1 = theoretical_pnl_6to1 * metrics['total_trades']
+            
+            print(f"Theoretical (6:1 RR): {theoretical_total_6to1:.2f} points")
+            print(f"Actual Total PnL: {metrics['total_pnl']:.2f} points")
+            performance_gap = metrics['total_pnl'] - theoretical_total_6to1
+            print(f"Performance Gap: {performance_gap:.2f} points ({(performance_gap/theoretical_total_6to1)*100:.1f}%)")
+            
+            # Timeout impact analysis
+            timeout_impact = timeout_trades * (theoretical_win_pnl * 0.5)  # Assume timeouts lose 50% of potential
+            print(f"\nTimeout Impact Analysis:")
+            print(f"  Timeout exits: {timeout_trades} ({timeout_trades/metrics['total_trades']*100:.1f}%)")
+            print(f"  Avg timeout PnL: {exit_stats['timeout']['avg_pnl']:.4f} points")
+            print(f"  Estimated timeout loss: {timeout_impact:.2f} points")
+            
+            # Exit efficiency calculation
+            tp_efficiency = (exit_stats['take_profit']['avg_pnl'] / theoretical_win_pnl) * 100 if tp_trades > 0 else 0
+            sl_efficiency = (abs(exit_stats['stop_loss']['avg_pnl']) / abs(theoretical_loss_pnl)) * 100 if sl_trades > 0 else 0
+            
+            print(f"\nExit Efficiency:")
+            print(f"  TP efficiency: {tp_efficiency:.1f}% (actual vs theoretical TP)")
+            print(f"  SL efficiency: {sl_efficiency:.1f}% (actual vs theoretical SL)")
+            
+            # Root cause identification
+            print(f"\n🎯 ROOT CAUSE ANALYSIS:")
+            if timeout_trades > metrics['total_trades'] * 0.3:  # >30% timeouts
+                print(f"  ⚠️  HIGH TIMEOUT RATE: {timeout_trades/metrics['total_trades']*100:.1f}% of trades timeout")
+                print(f"     Recommendation: Increase duration_limit or review TP levels")
+            
+            if tp_efficiency < 85:
+                print(f"  ⚠️  LOW TP EFFICIENCY: Only achieving {tp_efficiency:.1f}% of theoretical TP")
+                print(f"     Recommendation: Review TP calculation or market conditions")
+            
+            if sl_efficiency > 115:
+                print(f"  ⚠️  EXCESSIVE SL HITS: SL hits are {sl_efficiency:.1f}% of expected")
+                print(f"     Recommendation: Review SL placement or volatility adjustments")
         
         # LONG/SHORT Performance Breakdown
         if 'side_performance' in metrics and metrics['side_performance']:

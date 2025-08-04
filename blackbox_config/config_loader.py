@@ -67,3 +67,63 @@ def get_rr(cli_arg: Optional[float] = None) -> float:
     
     # Ultimate fallback
     return 3.0
+
+
+def get_leverage(cli_arg: Optional[float] = None) -> float:
+    """
+    Get leverage with precedence: CLI --leverage, env BLACKBOX_LEVERAGE, YAML default.
+    
+    Args:
+        cli_arg: Command line argument for leverage
+        
+    Returns:
+        Leverage as float
+    """
+    # CLI argument takes highest precedence
+    if cli_arg is not None:
+        return float(cli_arg)
+    
+    # Environment variable takes second precedence
+    env_leverage = os.getenv('BLACKBOX_LEVERAGE')
+    if env_leverage:
+        return float(env_leverage)
+    
+    # Fall back to YAML config default
+    config_path = Path(__file__).parent.parent / 'config' / 'config.yaml'
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            return float(config.get('leverage', 1.0))
+    
+    # Ultimate fallback
+    return 1.0
+
+
+def get_max_leverage(cli_arg: Optional[float] = None) -> float:
+    """
+    Get maximum leverage with precedence: CLI --max-leverage, env BLACKBOX_MAX_LEVERAGE, YAML default.
+    
+    Args:
+        cli_arg: Command line argument for max leverage
+        
+    Returns:
+        Maximum leverage as float
+    """
+    # CLI argument takes highest precedence
+    if cli_arg is not None:
+        return float(cli_arg)
+    
+    # Environment variable takes second precedence
+    env_max_leverage = os.getenv('BLACKBOX_MAX_LEVERAGE')
+    if env_max_leverage:
+        return float(env_max_leverage)
+    
+    # Fall back to YAML config default
+    config_path = Path(__file__).parent.parent / 'config' / 'config.yaml'
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            return float(config.get('max_leverage', 50.0))
+    
+    # Ultimate fallback
+    return 50.0

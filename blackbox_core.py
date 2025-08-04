@@ -349,6 +349,7 @@ class StrategyNodeParser:
             'version': r'^Version:\s*(.+)$',
             'date': r'^Date:\s*(.+)$',
             'status': r'^Status:\s*(.+)$',
+            'confidence': r'^Confidence:\s*(.+)$',
         }
     
     def parse_file(self, file_path: str) -> Optional[StrategyNode]:

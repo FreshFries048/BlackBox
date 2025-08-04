@@ -1,2 +1,4 @@
 data_file: data/raw/EURUSD_1H_2020-2024.csv
-rr_multiple: 3.0
+rr_multiple: 2.0
+leverage: 1.0
+max_leverage: 50.0

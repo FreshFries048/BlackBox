@@ -24,12 +24,19 @@ import sys
 import os
 # Ensure we can import from the current directory
 sys.path.insert(0, os.path.dirname(__file__))
-import blackbox_core  # Import the actual module file
-NodeEngine = blackbox_core.NodeEngine  # Get the class from the module
+
+# Import blackbox_core.py module directly to avoid package conflicts
+import importlib.util
+spec = importlib.util.spec_from_file_location("blackbox_core_module", 
+                                               os.path.join(os.path.dirname(__file__), "blackbox_core.py"))
+blackbox_core_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(blackbox_core_module)
+
+NodeEngine = blackbox_core_module.NodeEngine  # Get the class from the module
 
 from node_detector import NodeDetectorEngine, SignalEvent, MissingFeatureError
 from trade_executor import TradeExecutorEngine, RiskManager, Position
-from blackbox_config.config_loader import resolve_data_path, get_rr
+from blackbox_config.config_loader import resolve_data_path, get_rr, get_leverage, get_max_leverage
 from dataset_scanner import DatasetScanner
 
 # Only import performance optimizations if fast-mode is requested
@@ -57,6 +64,10 @@ def setup_environment():
         os.environ['BLACKBOX_SPREAD'] = '0.0001'
     if not os.getenv('BLACKBOX_RR_MULTIPLE'):
         os.environ['BLACKBOX_RR_MULTIPLE'] = '2.0'
+    if not os.getenv('BLACKBOX_LEVERAGE'):
+        os.environ['BLACKBOX_LEVERAGE'] = '1.0'
+    if not os.getenv('BLACKBOX_MAX_LEVERAGE'):
+        os.environ['BLACKBOX_MAX_LEVERAGE'] = '50.0'
 
 
 def load_market_data(data_file: str, start_date: Optional[str] = None, 
@@ -124,9 +135,11 @@ def run_full_backtest(args):
         progress = None
         logger.info("Starting BlackBox Trading System (Standard Mode with Core Optimizations)")
     
-    logger.info(f"RR Multiple: {args.rr_multiple}")
+    logger.info(f"RR Multiple: {args.rr}")
     logger.info(f"Commission: {args.commission}%")
     logger.info(f"Spread: {args.spread} points")
+    logger.info(f"Leverage: {args.leverage}:1")
+    logger.info(f"Max Leverage: {args.max_leverage}:1")
     
     try:
         # Load market data
@@ -166,9 +179,13 @@ def run_full_backtest(args):
         
         # Initialize production-grade risk manager with trading costs
         risk_manager = RiskManager(
-            rr_multiple=args.rr_multiple,
+            rr_multiple=args.rr,
             commission_pct=args.commission,
-            spread_points=args.spread
+            spread_points=args.spread,
+            leverage=args.leverage,
+            max_leverage=args.max_leverage,
+            account_equity=args.account_equity,
+            risk_pct=args.risk_pct
         )
         
         # Run signal detection with core optimizations
@@ -277,7 +294,7 @@ def run_full_backtest(args):
         
         # Save metadata
         metadata = {
-            'rr_multiple': args.rr_multiple,
+            'rr_multiple': args.rr,
             'commission_perc': args.commission,
             'spread_points': args.spread,
             'start_date': args.start_date,
@@ -359,9 +376,9 @@ def main():
     
     # Trading parameters
     parser.add_argument(
-        '--rr-multiple', 
+        '--rr', 
         type=float, 
-        default=float(os.getenv('BLACKBOX_RR_MULTIPLE', '2.0')),
+        default=2.0,
         help='Risk-reward multiple'
     )
     parser.add_argument(
@@ -375,6 +392,32 @@ def main():
         type=float, 
         default=float(os.getenv('BLACKBOX_SPREAD', '0.0001')),
         help='Spread in points'
+    )
+    parser.add_argument(
+        '--leverage', 
+        type=float, 
+        default=float(os.getenv('BLACKBOX_LEVERAGE', '1.0')),
+        help='Leverage multiplier (e.g., 10.0 for 10:1 leverage)'
+    )
+    parser.add_argument(
+        '--max-leverage', 
+        type=float, 
+        default=float(os.getenv('BLACKBOX_MAX_LEVERAGE', '50.0')),
+        help='Maximum allowed leverage'
+    )
+    
+    # Risk Management options
+    parser.add_argument(
+        '--account-equity', 
+        type=float, 
+        default=float(os.getenv('BLACKBOX_ACCOUNT_EQUITY', '100000.0')),
+        help='Account equity for position sizing'
+    )
+    parser.add_argument(
+        '--risk-pct', 
+        type=float, 
+        default=float(os.getenv('BLACKBOX_RISK_PCT', '0.02')),
+        help='Risk percentage per trade (e.g., 0.02 for 2%)'
     )
     
     # Output options

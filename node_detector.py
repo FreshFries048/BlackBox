@@ -26,7 +26,13 @@ except ImportError:
 
 # Import the actual blackbox_core.py module file
 sys.path.insert(0, os.path.dirname(__file__))
-import blackbox_core
+
+# Import blackbox_core.py module directly to avoid package conflicts
+import importlib.util
+spec = importlib.util.spec_from_file_location("blackbox_core_module", 
+                                               os.path.join(os.path.dirname(__file__), "blackbox_core.py"))
+blackbox_core_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(blackbox_core_module)
 
 # Production Grade: Custom exception for missing features (no silent failures)
 class MissingFeatureError(Exception):
@@ -34,8 +40,8 @@ class MissingFeatureError(Exception):
     pass
 
 # Get classes from the module
-NodeEngine = blackbox_core.NodeEngine
-StrategyNode = blackbox_core.StrategyNode
+NodeEngine = blackbox_core_module.NodeEngine
+StrategyNode = blackbox_core_module.StrategyNode
 
 
 @dataclass
@@ -548,7 +554,7 @@ class NodeDetectorEngine:
             node_name=node.name,
             timestamp=str(data_dict.get('timestamp', '')),
             trigger_reason=match_result.get('trigger_reason', 'Optimized detection'),
-            confidence=getattr(node, 'confidence', 'Medium'),
+            confidence=node.metadata.get('confidence', 'Medium'),
             entry_price=float(data_dict.get('price', 0.0)),
             node_type=getattr(node, 'type', ''),
             workflow_matches=len(match_result.get('matched_conditions', [])),
@@ -732,7 +738,7 @@ class NodeDetectorEngine:
             node_name=node.name,
             timestamp=str(data_dict.get('timestamp', '')),
             trigger_reason=match_result.get('trigger_reason', 'Optimized detection'),
-            confidence=getattr(node, 'confidence', 'Medium'),
+            confidence=node.metadata.get('confidence', 'Medium'),
             entry_price=float(data_dict.get('price', 0.0)),
             node_type=getattr(node, 'type', ''),
             workflow_matches=len(match_result.get('matched_conditions', [])),
